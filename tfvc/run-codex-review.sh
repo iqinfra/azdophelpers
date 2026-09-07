@@ -384,8 +384,6 @@ CODEX_ARGS=(
 
     --sandbox read-only
 
-    --ask-for-approval never
-
     --ignore-user-config
 
     --ignore-rules
@@ -395,6 +393,8 @@ CODEX_ARGS=(
     --output-schema "$SCHEMA_FILE"
 
     --output-last-message "$REVIEW_JSON"
+
+    -c 'approval_policy="never"'
 
     -c 'web_search="disabled"'
 
