@@ -24,7 +24,7 @@ set -Eeuo pipefail
 umask 077
 export LC_ALL=C
 
-readonly HELPER_VERSION='tfvc-rest-diff-1'
+readonly HELPER_VERSION='tfvc-rest-diff-1.2'
 readonly API_VERSION='7.1'
 readonly PAGE_SIZE=100
 
@@ -256,7 +256,21 @@ fi
 # Required tools
 ###############################################################################
 
-for command in curl jq diff mktemp wc
+for command in \
+    curl \
+    jq \
+    diff \
+    grep \
+    mktemp \
+    wc \
+    tr \
+    head \
+    sleep \
+    chmod \
+    mkdir \
+    rm \
+    mv \
+    cat
 do
     if ! command -v "$command" >/dev/null 2>&1; then
         die "Required command '${command}' was not found in PATH."
@@ -326,6 +340,8 @@ rm -f -- \
 # so child processes do not inherit it automatically.
 #
 TOKEN="$SYSTEM_ACCESSTOKEN"
+
+export -n TOKEN
 
 unset SYSTEM_ACCESSTOKEN
 
@@ -650,31 +666,6 @@ change_has() {
 
 
 ###############################################################################
-# Extract metadata fields
-###############################################################################
-
-metadata_fields() {
-
-    #
-    # Returns:
-    #
-    # size<TAB>hash<TAB>binary<TAB>folder<TAB>encoding
-    #
-
-    jq -r '
-        [
-            (.size // 0),
-            (.hashValue // ""),
-            (.contentMetadata.isBinary // false),
-            (.isFolder // false),
-            (.encoding // 0)
-        ]
-        | @tsv
-    ' "$1"
-}
-
-
-###############################################################################
 # Manifest record
 ###############################################################################
 
@@ -854,13 +845,25 @@ fetch_side() {
     fi
 
 
-    IFS=$'\t' read -r \
-        size \
-        hash \
-        binary \
-        folder \
-        encoding \
-        < <(metadata_fields "$meta")
+    size="$(
+        jq -r '.size // 0' "$meta"
+    )"
+
+    hash="$(
+        jq -r '.hashValue // ""' "$meta"
+    )"
+
+    binary="$(
+        jq -r '.contentMetadata.isBinary // false' "$meta"
+    )"
+
+    folder="$(
+        jq -r '.isFolder // false' "$meta"
+    )"
+
+    encoding="$(
+        jq -r '.encoding // 0' "$meta"
+    )"
 
 
     if ! [[ "$size" =~ ^[0-9]+$ ]]; then
@@ -941,14 +944,15 @@ fetch_side() {
 
 
     if ! get_item_content \
-        "$server_path" \
-        "$version" \
-        "$body"
+    "$server_path" \
+    "$version" \
+    "$body"
     then
 
-        log_rest_failure \
-            "Get TFVC ${side}-side content for $(safe_path_log "$server_path") at C${version}" \
-            "$body"
+        log_error \
+            "Get TFVC ${side}-side content failed for $(safe_path_log "$server_path") at C${version} (curl=${HTTP_CURL_RC}, HTTP=${HTTP_STATUS})."
+
+        rm -f -- "$body"
 
         return 1
     fi
@@ -1031,13 +1035,19 @@ then
 fi
 
 
-if ! jq -e '
-    type == "object"
-    and (.changesetId | type == "number")
-' "$CHANGESET_META" >/dev/null 2>&1
+if ! jq -e \
+    --argjson expected "$CURRENT_CHANGESET" \
+    '
+        type == "object"
+        and (.changesetId | type == "number")
+        and (.changesetId == $expected)
+    ' \
+    "$CHANGESET_META" \
+    >/dev/null 2>&1
 then
 
-    die "Changeset metadata response was not valid JSON."
+    die \
+        "Changeset metadata response was invalid or did not match C${CURRENT_CHANGESET}."
 fi
 
 
@@ -1047,17 +1057,13 @@ fi
 
 printf 'Enumerating changed items...\n'
 
-
 skip=0
-
 TOTAL_ENUMERATED=0
-
 
 while :
 do
 
     page="$WORK/changes-${skip}.json"
-
 
     if ! rest_get \
         "$page" \
@@ -1075,7 +1081,6 @@ do
         exit 1
     fi
 
-
     if ! jq -e \
         '.value | type == "array"' \
         "$page" \
@@ -1086,50 +1091,35 @@ do
             "Changeset changes response at offset ${skip} did not contain a value array."
     fi
 
-
     page_count="$(
         jq '.value | length' "$page"
     )"
 
-
     if (( page_count == 0 )); then
         break
     fi
-
 
     jq -c \
         '.value[]' \
         "$page" \
         >> "$RAW_CHANGES"
 
-
-    TOTAL_ENUMERATED=$(
-        (
-            TOTAL_ENUMERATED + page_count
-        )
-    )
-
+    TOTAL_ENUMERATED=$((TOTAL_ENUMERATED + page_count))
 
     if (( TOTAL_ENUMERATED > MAX_CHANGES )); then
 
         die \
             "Changeset C${CURRENT_CHANGESET} exceeds TFVC_MAX_CHANGES=${MAX_CHANGES}. Refusing an incomplete security-review input."
-    fi
 
+    fi
 
     if (( page_count < PAGE_SIZE )); then
         break
     fi
 
-
-    skip=$(
-        (
-            skip + page_count
-        )
-    )
+    skip=$((skip + page_count))
 
 done
-
 
 printf 'Enumerated     : %s changes\n' \
     "$TOTAL_ENUMERATED"
@@ -1626,6 +1616,13 @@ do
     append_record
 
 done < "$RAW_CHANGES"
+
+if (( IN_SCOPE_COUNT == 0 )); then
+
+    die \
+        "Changeset C${CURRENT_CHANGESET} contains no changes under TFVC_SERVER_PATH='${TFVC_SERVER_PATH}'. Refusing to generate an empty security-review input."
+
+fi
 
 
 ###############################################################################
