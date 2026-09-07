@@ -101,8 +101,8 @@ AZURE_MODEL_DEPLOYMENT=$AZURE_OPENAI_MODEL_DEPLOYMENT
 [[ $AZURE_MODEL_DEPLOYMENT =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'Azure deployment name contains unsupported characters.'
 REASONING_EFFORT=${CODEX_REASONING_EFFORT:-high}
 case "$REASONING_EFFORT" in
-    minimal|low|medium|high|xhigh) ;;
-    *) die 'CODEX_REASONING_EFFORT must be minimal, low, medium, high or xhigh (deployment support also required).' ;;
+    none|minimal|low|medium|high|xhigh|max) ;;
+    *) die 'CODEX_REASONING_EFFORT must be none, minimal, low, medium, high, xhigh or max (CLI and deployment support also required).' ;;
 esac
 
 WORK=$(mktemp -d "${TEMP_DIR%/}/codex-tfvc-review.XXXXXXXX")
@@ -428,6 +428,3 @@ if [[ $GATE_STATUS == fail ]]; then
 fi
 set_variable CODEX_REVIEW_GATE pass
 printf 'Codex security gate passed.\n'
-
-
-
