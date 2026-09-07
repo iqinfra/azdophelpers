@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+
+<meta
+  http-equiv="Content-Security-Policy"
+  content="
+    default-src 'none';
+    style-src 'unsafe-inline';
+    img-src 'none';
+    script-src 'none';
+    connect-src 'none';
+    object-src 'none';
+    frame-src 'none';
+    base-uri 'none';
+    form-action 'none';
+  "
+>
+
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>Codex Security Review</title>
+
+<style>
+:root {
+    color-scheme: light;
+
+    --bg: #f4f6f8;
+    --surface: #ffffff;
+    --surface-alt: #f8fafc;
+    --text: #172033;
+    --muted: #64748b;
+    --border: #dce3ea;
+
+    --critical: #991b1b;
+    --high: #c2410c;
+    --medium: #a16207;
+    --low: #0369a1;
+    --info: #475569;
+    --pass: #166534;
+    --fail: #991b1b;
+
+    --radius: 12px;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif;
+    line-height: 1.55;
+}
+
+.container {
+    width: min(1400px, calc(100% - 32px));
+    margin: 32px auto 64px;
+}
+
+.report-header,
+.panel,
+.finding {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+.report-header {
+    padding: 30px;
+    margin-bottom: 20px;
+}
+
+.report-kicker {
+    color: var(--muted);
+    font-size: .8rem;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+}
+
+h1,
+h2,
+h3 {
+    line-height: 1.2;
+}
+
+h1 {
+    margin: 6px 0 14px;
+}
+
+h2 {
+    margin-top: 0;
+}
+
+.panel {
+    padding: 24px;
+    margin-top: 20px;
+}
+
+.metrics {
+    display: grid;
+    grid-template-columns:
+        repeat(6, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 20px;
+}
+
+.metric {
+    background: var(--surface-alt);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+}
+
+.metric-label {
+    color: var(--muted);
+    font-size: .8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.metric-value {
+    font-size: 2rem;
+    font-weight: 700;
+}
+
+.badge {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: .75rem;
+    font-weight: 800;
+    letter-spacing: .04em;
+}
+
+.severity-critical {
+    color: var(--critical);
+}
+
+.severity-high {
+    color: var(--high);
+}
+
+.severity-medium {
+    color: var(--medium);
+}
+
+.severity-low {
+    color: var(--low);
+}
+
+.severity-info {
+    color: var(--info);
+}
+
+.gate-pass {
+    color: var(--pass);
+    font-weight: 800;
+}
+
+.gate-fail {
+    color: var(--fail);
+    font-weight: 800;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+th,
+td {
+    border-bottom: 1px solid var(--border);
+    padding: 11px 12px;
+    text-align: left;
+    vertical-align: top;
+}
+
+th {
+    color: var(--muted);
+    font-size: .78rem;
+    text-transform: uppercase;
+}
+
+.table-scroll {
+    overflow-x: auto;
+}
+
+.finding {
+    margin-top: 18px;
+    overflow: hidden;
+}
+
+.finding-header {
+    padding: 20px 22px;
+    border-bottom: 1px solid var(--border);
+}
+
+.finding-body {
+    padding: 22px;
+}
+
+.finding-meta {
+    display: grid;
+    grid-template-columns:
+        repeat(3, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.meta-item {
+    background: var(--surface-alt);
+    padding: 12px;
+    border-radius: 8px;
+}
+
+.meta-label {
+    color: var(--muted);
+    font-size: .75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+pre {
+    background: #111827;
+    color: #e5e7eb;
+    padding: 16px;
+    overflow-x: auto;
+    border-radius: 8px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+code {
+    font-family:
+        ui-monospace,
+        SFMono-Regular,
+        Menlo,
+        Monaco,
+        Consolas,
+        monospace;
+}
+
+.report-footer {
+    margin-top: 30px;
+    color: var(--muted);
+    font-size: .8rem;
+}
+
+@media (max-width: 1000px) {
+    .metrics {
+        grid-template-columns:
+            repeat(3, minmax(0, 1fr));
+    }
+
+    .finding-meta {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 600px) {
+    .metrics {
+        grid-template-columns:
+            repeat(2, minmax(0, 1fr));
+    }
+
+    .container {
+        width: min(100% - 20px, 1400px);
+        margin-top: 10px;
+    }
+}
+
+@media print {
+    body {
+        background: white;
+    }
+
+    .container {
+        width: 100%;
+        margin: 0;
+    }
+
+    .panel,
+    .finding,
+    .report-header {
+        break-inside: avoid;
+    }
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+    <!--
+      This file establishes the visual contract.
+
+      The renderer should populate the complete report while retaining
+      this structure and styling language.
+    -->
+
+</div>
+
+</body>
+</html>

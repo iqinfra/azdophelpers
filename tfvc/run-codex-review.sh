@@ -1,329 +1,123 @@
 #!/usr/bin/env bash
-
+# Run as a child process, not with source. Requires Bash and jq 1.6+.
 set +x
+set +a
 set -Eeuo pipefail
-
 umask 077
 export LC_ALL=C
 
-
-###############################################################################
-# Azure DevOps logging
-###############################################################################
-
 escape_vso() {
     local text=${1-}
-
     text=${text//'%'/'%AZP25'}
     text=${text//$'\r'/'%0D'}
     text=${text//$'\n'/'%0A'}
-
     printf '%s' "$text"
 }
-
-log_error() {
-    printf '##vso[task.logissue type=error]%s\n' \
-        "$(escape_vso "$1")"
-}
-
-log_warning() {
-    printf '##vso[task.logissue type=warning]%s\n' \
-        "$(escape_vso "$1")"
-}
-
-die() {
-    log_error "$1"
-    exit 1
-}
-
-
-###############################################################################
-# Required commands
-###############################################################################
-
-for command in \
-    codex \
-    jq \
-    mktemp \
-    chmod \
-    mkdir \
-    rm \
-    cat \
-    grep \
-    sed \
-    tail
-do
-    if ! command -v "$command" >/dev/null 2>&1; then
-        die "Required command '${command}' was not found in PATH."
-    fi
-done
-
-
-###############################################################################
-# Required Azure DevOps variables
-###############################################################################
-
-for name in \
-    BUILD_SOURCEVERSION \
-    BUILD_ARTIFACTSTAGINGDIRECTORY \
-    AGENT_TEMPDIRECTORY
-do
-    if [[ -z ${!name:-} ]]; then
-        die "Required variable ${name} is missing."
-    fi
-done
-
-
-###############################################################################
-# Determine TFVC changeset
-###############################################################################
-
-if ! [[ "$BUILD_SOURCEVERSION" =~ ^[Cc]?([0-9]{1,10})$ ]]; then
-    die \
-        "Build.SourceVersion '${BUILD_SOURCEVERSION}' is not a numeric TFVC changeset."
-fi
-
-CURRENT_CHANGESET=$((10#${BASH_REMATCH[1]}))
-
-if (( CURRENT_CHANGESET <= 0 )); then
-    die "Invalid TFVC changeset C${CURRENT_CHANGESET}."
-fi
-
-ARTIFACT_DIR="${BUILD_ARTIFACTSTAGINGDIRECTORY%/}"
-
-
-###############################################################################
-# Review artifacts produced by generate-changeset-diff.sh
-###############################################################################
-
-DIFF_FILE="${ARTIFACT_DIR}/tfvc-changeset-${CURRENT_CHANGESET}.diff"
-
-MANIFEST_FILE="${ARTIFACT_DIR}/tfvc-changeset-${CURRENT_CHANGESET}-manifest.json"
-
-CONTEXT_FILE="${ARTIFACT_DIR}/tfvc-changeset-${CURRENT_CHANGESET}-codex-context.md"
-
-REVIEW_JSON="${ARTIFACT_DIR}/tfvc-changeset-${CURRENT_CHANGESET}-codex-review.json"
-
-REVIEW_MD="${ARTIFACT_DIR}/tfvc-changeset-${CURRENT_CHANGESET}-codex-review.md"
-
-
-for file in \
-    "$DIFF_FILE" \
-    "$MANIFEST_FILE" \
-    "$CONTEXT_FILE"
-do
-    if [[ ! -f "$file" ]]; then
-        die "Required Codex review input is missing: ${file}"
-    fi
-done
-
-
-###############################################################################
-# Fail closed before invoking Codex
-###############################################################################
-
-if ! jq -e '
-    type == "object"
-    and (.coverage | type == "object")
-    and (.coverage.reviewComplete == true)
-    and (.coverage.unreviewableChanges == 0)
-    and (.coverage.inScopeChanges > 0)
-' "$MANIFEST_FILE" >/dev/null
-then
-    die \
-        "TFVC manifest is incomplete. Refusing to invoke Codex."
-fi
-
-
-###############################################################################
-# Azure OpenAI / Microsoft Foundry configuration
-###############################################################################
-
-for name in \
-    AZURE_OPENAI_API_KEY \
-    AZURE_OPENAI_BASE_URL \
-    AZURE_OPENAI_MODEL_DEPLOYMENT
-do
-    if [[ -z ${!name:-} ]]; then
-        die "Required Azure Foundry variable ${name} is missing."
-    fi
-done
-
-
-###############################################################################
-# Validate Azure configuration
-###############################################################################
-
-AZURE_BASE_URL="${AZURE_OPENAI_BASE_URL%/}"
-
-AZURE_MODEL_DEPLOYMENT="$AZURE_OPENAI_MODEL_DEPLOYMENT"
-
-
-#
-# Azure OpenAI / Foundry endpoints must use HTTPS.
-#
-
-if [[ "$AZURE_BASE_URL" != https://* ]]; then
-    die \
-        "AZURE_OPENAI_BASE_URL must use HTTPS."
-fi
-
-
-#
-# This helper is intentionally built for the current Azure OpenAI /
-# Microsoft Foundry v1 Responses API.
-#
-# Expected examples:
-#
-# https://resource.openai.azure.com/openai/v1
-#
-# or:
-#
-# https://resource.services.ai.azure.com/openai/v1
-#
-# or a supported Foundry project endpoint ending in /openai/v1.
-#
-
-if [[ "$AZURE_BASE_URL" != */openai/v1 ]]; then
-    die \
-        "AZURE_OPENAI_BASE_URL must be a v1 Azure OpenAI/Foundry endpoint ending in /openai/v1."
-fi
-
-
-#
-# Query strings and fragments must not be embedded in the base URL.
-#
-
-if [[
-    "$AZURE_BASE_URL" == *'?'* ||
-    "$AZURE_BASE_URL" == *'#'*
-]]; then
-    die \
-        "AZURE_OPENAI_BASE_URL must not contain a query string or URL fragment."
-fi
-
-
-#
-# Reject characters which could break the generated TOML configuration.
-#
-
-if [[
-    "$AZURE_BASE_URL" == *$'\r'* ||
-    "$AZURE_BASE_URL" == *$'\n'* ||
-    "$AZURE_BASE_URL" == *$'\t'* ||
-    "$AZURE_BASE_URL" == *'"'* ||
-    "$AZURE_BASE_URL" == *\\*
-]]; then
-    die \
-        "AZURE_OPENAI_BASE_URL contains an invalid character."
-fi
-
-if [[
-    "$AZURE_MODEL_DEPLOYMENT" == *$'\r'* ||
-    "$AZURE_MODEL_DEPLOYMENT" == *$'\n'* ||
-    "$AZURE_MODEL_DEPLOYMENT" == *$'\t'* ||
-    "$AZURE_MODEL_DEPLOYMENT" == *'"'* ||
-    "$AZURE_MODEL_DEPLOYMENT" == *\\*
-]]; then
-    die \
-        "AZURE_OPENAI_MODEL_DEPLOYMENT contains an invalid character."
-fi
-
-
-###############################################################################
-# Secure Azure credential handling
-###############################################################################
-
-#
-# Copy the Azure API key into a shell variable.
-#
-# It will later be supplied only to the Codex process.
-#
-
-AZURE_KEY="$AZURE_OPENAI_API_KEY"
-
-
-#
-# Remove credentials from the environment inherited by ordinary child
-# processes.
-#
-
-unset AZURE_OPENAI_API_KEY
-unset CODEX_API_KEY
-unset OPENAI_API_KEY
-unset SYSTEM_ACCESSTOKEN
-
-
-###############################################################################
-# Codex reasoning configuration
-###############################################################################
-
-REASONING_EFFORT="${CODEX_REASONING_EFFORT:-max}"
-
-case "$REASONING_EFFORT" in
-    minimal|low|medium|high|xhigh|max)
-        ;;
-    *)
-        die \
-            "CODEX_REASONING_EFFORT must be minimal, low, medium, high, or xhigh."
-        ;;
-esac
-
-
-###############################################################################
-# Isolated Codex workspace
-###############################################################################
-
-WORK="$(
-    mktemp -d \
-        "${AGENT_TEMPDIRECTORY%/}/codex-tfvc-review.XXXXXXXX"
-)"
-
-chmod 700 "$WORK"
-
-
-###############################################################################
-# Cleanup
-###############################################################################
-
+log_error() { printf '##vso[task.logissue type=error]%s\n' "$(escape_vso "$1")"; }
+log_warning() { printf '##vso[task.logissue type=warning]%s\n' "$(escape_vso "$1")"; }
+die() { log_error "$1"; exit 1; }
+set_variable() { printf '##vso[task.setvariable variable=%s]%s\n' "$1" "$(escape_vso "$2")"; }
+
+# Fail closed even when a prerequisite or download fails.
+set_variable CODEX_REVIEW_GATE fail
+set_variable CODEX_REVIEW_FILE ''
+set_variable CODEX_REVIEW_MD_FILE ''
+set_variable CODEX_CRITICAL_COUNT ''
+set_variable CODEX_HIGH_COUNT ''
+
+# Capture the key before any external command; remove inherited export attributes.
+AZURE_KEY=${AZURE_OPENAI_API_KEY:-}
+export -n AZURE_KEY
+unset AZURE_OPENAI_API_KEY CODEX_API_KEY OPENAI_API_KEY SYSTEM_ACCESSTOKEN
+WORK=''
 cleanup() {
+    local status=$?
+    trap - EXIT ERR INT TERM
     AZURE_KEY=''
-
-    if [[ -n ${WORK:-} ]]; then
-        rm -rf -- "$WORK"
+    if [[ -n $WORK ]]; then
+        if ! rm -rf -- "$WORK"; then
+            log_error 'Unable to remove the temporary review workspace.'
+            status=1
+        fi
     fi
+    if (( status != 0 )); then
+        set_variable CODEX_REVIEW_GATE fail
+    fi
+    exit "$status"
 }
-
 trap cleanup EXIT
+trap 'die "Review helper failed unexpectedly at line ${LINENO}."' ERR
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+for required_command in codex jq curl sha256sum mktemp chmod mkdir rm cat mv; do
+    command -v "$required_command" >/dev/null 2>&1 || die "Required command '${required_command}' was not found."
+done
+jq -en '"high" | IN("high")' >/dev/null 2>&1 || die 'jq 1.6 or newer is required.'
 
-###############################################################################
-# Isolated CODEX_HOME
-###############################################################################
+for name in HELPER_COMMIT BUILD_SOURCEVERSION BUILD_ARTIFACTSTAGINGDIRECTORY AGENT_TEMPDIRECTORY AZURE_OPENAI_BASE_URL AZURE_OPENAI_MODEL_DEPLOYMENT; do
+    [[ -n ${!name:-} ]] || die "Required variable ${name} is missing."
+done
+[[ -n $AZURE_KEY ]] || die 'AZURE_OPENAI_API_KEY is missing.'
+[[ $HELPER_COMMIT =~ ^[0-9a-fA-F]{40}$ ]] || die 'HELPER_COMMIT must be a full 40-character Git commit SHA.'
+readonly HELPER_COMMIT
 
+[[ $BUILD_SOURCEVERSION =~ ^[Cc]?([0-9]{1,10})$ ]] || die 'Build.SourceVersion must be a numeric TFVC changeset.'
+CURRENT_CHANGESET=$((10#${BASH_REMATCH[1]}))
+(( CURRENT_CHANGESET > 0 )) || die 'TFVC changeset must be positive.'
+
+# Resolve directories before changing working directory. Spaces are supported.
+[[ -d $BUILD_ARTIFACTSTAGINGDIRECTORY && -w $BUILD_ARTIFACTSTAGINGDIRECTORY ]] || die 'Artifact staging directory must exist and be writable.'
+[[ -d $AGENT_TEMPDIRECTORY && -w $AGENT_TEMPDIRECTORY ]] || die 'Agent temporary directory must exist and be writable.'
+ARTIFACT_DIR=$(cd -- "$BUILD_ARTIFACTSTAGINGDIRECTORY" && pwd -P)
+TEMP_DIR=$(cd -- "$AGENT_TEMPDIRECTORY" && pwd -P)
+for directory in "$ARTIFACT_DIR" "$TEMP_DIR"; do
+    [[ $directory != / && $directory != *[[:cntrl:]]* ]] || die 'Directory paths must not be root or contain control characters.'
+done
+DIFF_FILE="$ARTIFACT_DIR/tfvc-changeset-${CURRENT_CHANGESET}.diff"
+MANIFEST_FILE="$ARTIFACT_DIR/tfvc-changeset-${CURRENT_CHANGESET}-manifest.json"
+CONTEXT_FILE="$ARTIFACT_DIR/tfvc-changeset-${CURRENT_CHANGESET}-codex-context.md"
+REVIEW_JSON="$ARTIFACT_DIR/tfvc-changeset-${CURRENT_CHANGESET}-codex-review.json"
+REVIEW_MD="$ARTIFACT_DIR/tfvc-changeset-${CURRENT_CHANGESET}-codex-review.md"
+# Never reuse a previous run's review output.
+rm -f -- "$REVIEW_JSON" "$REVIEW_MD"
+for file in "$DIFF_FILE" "$MANIFEST_FILE" "$CONTEXT_FILE"; do
+    [[ -f $file && -r $file && -s $file ]] || die "Required review input is missing, empty or unreadable: ${file}"
+done
+if ! jq -se '
+    length == 1 and (.[0] |
+      type == "object" and (.coverage | type == "object")
+      and (.coverage.reviewComplete == true)
+      and (.coverage.unreviewableChanges == 0)
+      and (.coverage.inScopeChanges | type == "number" and . > 0 and . == floor))
+' "$MANIFEST_FILE" >/dev/null 2>&1; then
+    die 'TFVC manifest is incomplete or invalid. Refusing to invoke Codex.'
+fi
+
+AZURE_BASE_URL=${AZURE_OPENAI_BASE_URL%/}
+AZURE_MODEL_DEPLOYMENT=$AZURE_OPENAI_MODEL_DEPLOYMENT
+# Constrain interpolated TOML strings and reject URL credentials/query/fragment.
+[[ $AZURE_BASE_URL =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~-]+)*/openai/v1$ ]] || die 'Azure base URL must be an HTTPS endpoint ending in /openai/v1, without credentials, query or fragment.'
+[[ $AZURE_MODEL_DEPLOYMENT =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die 'Azure deployment name contains unsupported characters.'
+REASONING_EFFORT=${CODEX_REASONING_EFFORT:-high}
+case "$REASONING_EFFORT" in
+    minimal|low|medium|high|xhigh) ;;
+    *) die 'CODEX_REASONING_EFFORT must be minimal, low, medium, high or xhigh (deployment support also required).' ;;
+esac
+
+WORK=$(mktemp -d "${TEMP_DIR%/}/codex-tfvc-review.XXXXXXXX")
+chmod 700 "$WORK"
+# The EXIT trap is already active before any workspace setup or download.
 CODEX_HOME_DIR="$WORK/codex-home"
-
 mkdir -p -- "$CODEX_HOME_DIR"
-
 chmod 700 "$CODEX_HOME_DIR"
-
 CODEX_CONFIG="$CODEX_HOME_DIR/config.toml"
-
-
-###############################################################################
-# Generate deterministic Codex configuration
-###############################################################################
-
 cat > "$CODEX_CONFIG" <<EOF
 model = "${AZURE_MODEL_DEPLOYMENT}"
 model_provider = "azure"
 model_reasoning_effort = "${REASONING_EFFORT}"
-
 approval_policy = "never"
 web_search = "disabled"
-
 project_root_markers = []
 
 [model_providers.azure]
@@ -337,27 +131,41 @@ supports_websockets = false
 [shell_environment_policy]
 inherit = "none"
 EOF
-
 chmod 600 "$CODEX_CONFIG"
 
-
-###############################################################################
-# Working files
-###############################################################################
+# Retain the supplied hashes. Update these only after verifying trusted skill bytes.
+readonly SKILL_BASE_URL="https://raw.githubusercontent.com/iqinfra/azdophelpers/${HELPER_COMMIT}/tfvc/skills/security-review-html"
+readonly SKILL_MD_SHA256='b100dd83b716de40422dc97e2660dca4cf5075b7ab4d61164bf847b7fa9d6c81'
+readonly SKILL_CONTRACT_SHA256='d6c195c83132ac73a96dec0d4a6f22dfc3afb8907c2aa8d7a3062424e37a4058'
+readonly SKILL_TEMPLATE_SHA256='6cf18163e210f9b8f7341045eaacf663be1ee7fa596d74bff45179e13aed4b26'
+download_verified_file() {
+    local url=$1 output=$2 expected_sha256=$3 actual_sha256
+    [[ $expected_sha256 =~ ^[0-9a-f]{64}$ ]] || die 'Invalid pinned skill digest.'
+    # -q must be first: do not load an agent user's curl configuration.
+    if ! curl -q --fail --silent --show-error --location \
+        --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --connect-timeout 20 --max-time 120 --retry 2 \
+        --output "${output}.part" "$url" 2> "$WORK/download.stderr"; then
+        die 'Pinned skill download failed.'
+    fi
+    actual_sha256=$(sha256sum < "${output}.part") || die 'Unable to hash downloaded skill.'
+    actual_sha256=${actual_sha256%% *}
+    [[ $actual_sha256 == "$expected_sha256" ]] || die 'SHA-256 verification failed for a downloaded skill file.'
+    chmod 600 "${output}.part"
+    mv -- "${output}.part" "$output"
+}
+# Download outside skill discovery first; expose the skill only after JSON analysis.
+SKILL_STAGE="$WORK/skill-stage"
+mkdir -p -- "$SKILL_STAGE/references" "$SKILL_STAGE/assets"
+download_verified_file "$SKILL_BASE_URL/SKILL.md" "$SKILL_STAGE/SKILL.md" "$SKILL_MD_SHA256"
+download_verified_file "$SKILL_BASE_URL/references/report-contract.md" "$SKILL_STAGE/references/report-contract.md" "$SKILL_CONTRACT_SHA256"
+download_verified_file "$SKILL_BASE_URL/assets/report-template.html" "$SKILL_STAGE/assets/report-template.html" "$SKILL_TEMPLATE_SHA256"
 
 SCHEMA_FILE="$WORK/review-schema.json"
-
 INPUT_FILE="$WORK/review-input.txt"
-
+RAW_REVIEW_JSON="$WORK/review.raw.json"
 STDOUT_FILE="$WORK/codex.stdout"
-
 STDERR_FILE="$WORK/codex.stderr"
-
-
-###############################################################################
-# Structured output schema
-###############################################################################
-
 cat > "$SCHEMA_FILE" <<'JSON'
 {
   "type": "object",
@@ -452,48 +260,8 @@ cat > "$SCHEMA_FILE" <<'JSON'
 }
 JSON
 
-chmod 600 "$SCHEMA_FILE"
-
-
-###############################################################################
-# Assemble Codex review data
-###############################################################################
-
-{
-    printf '%s\n' \
-        '===== BEGIN REVIEW CONTEXT ====='
-
-    cat -- "$CONTEXT_FILE"
-
-    printf '%s\n' \
-        '===== END REVIEW CONTEXT ====='
-
-    printf '%s\n' \
-        '===== BEGIN UNTRUSTED MANIFEST DATA ====='
-
-    cat -- "$MANIFEST_FILE"
-
-    printf '%s\n' \
-        '===== END UNTRUSTED MANIFEST DATA ====='
-
-    printf '%s\n' \
-        '===== BEGIN UNTRUSTED UNIFIED DIFF ====='
-
-    cat -- "$DIFF_FILE"
-
-    printf '%s\n' \
-        '===== END UNTRUSTED UNIFIED DIFF ====='
-
-} > "$INPUT_FILE"
-
-chmod 600 "$INPUT_FILE"
-
-
-###############################################################################
-# Trusted Codex instruction
-###############################################################################
-
 PROMPT="
+
 Perform a security-first code review of TFVC changeset C${CURRENT_CHANGESET}
 using only the supplied review package.
 
@@ -536,450 +304,130 @@ Set:
 schemaVersion = 1
 changeset = ${CURRENT_CHANGESET}
 "
-
-
-###############################################################################
-# Codex CLI arguments
-###############################################################################
-
-CODEX_ARGS=(
-    exec
-
-    --ephemeral
-
-    --skip-git-repo-check
-
-    --cd "$WORK"
-
-    --sandbox read-only
-
-    --ignore-rules
-
-    --color never
-
-    --output-schema "$SCHEMA_FILE"
-
-    --output-last-message "$REVIEW_JSON"
-)
-
-
-###############################################################################
-# Initial fail-closed Azure DevOps gate state
-###############################################################################
-
-printf \
-    '##vso[task.setvariable variable=CODEX_REVIEW_GATE]fail\n'
-
-
-###############################################################################
-# Codex version
-###############################################################################
-
-printf 'Codex CLI version: '
-
-codex --version
-
-
-###############################################################################
-# Run Codex
-###############################################################################
-
-printf \
-    'Running Codex security/code review for C%s...\n' \
-    "$CURRENT_CHANGESET"
-
-printf \
-    'Codex provider: Azure OpenAI / Microsoft Foundry\n'
-
-printf \
-    'Codex deployment: %s\n' \
-    "$AZURE_MODEL_DEPLOYMENT"
-
-#
-# Intentionally do NOT print:
-#
-# - AZURE_OPENAI_API_KEY
-# - the assembled review input
-# - Codex stdout
-#
-# AZURE_OPENAI_API_KEY exists only in the environment of the Codex process.
-#
-
-if ! CODEX_HOME="$CODEX_HOME_DIR" \
-    AZURE_OPENAI_API_KEY="$AZURE_KEY" \
-    codex \
-        "${CODEX_ARGS[@]}" \
-        "$PROMPT" \
-        < "$INPUT_FILE" \
-        > "$STDOUT_FILE" \
-        2> "$STDERR_FILE"
-then
-    log_error \
-        "Codex execution failed for C${CURRENT_CHANGESET}."
-
-    #
-    # Do not dump raw stderr.
-    #
-    # Codex diagnostics can contain portions of stdin/source code.
-    #
-    # Only emit lines which look like Codex-generated diagnostics.
-    #
-
-    printf 'Codex diagnostic summary:\n'
-
-    grep -E \
-        '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^ ]+[[:space:]]+(ERROR|WARN)|^ERROR:|^error:|^warning:' \
-        "$STDERR_FILE" \
-        |
-        sed -E \
-            's/(Incorrect API key provided:[[:space:]]*)[^ ,]+/\1[REDACTED]/Ig' \
-        |
-        tail -n 20 \
-        ||
-        true
-
-    exit 1
-fi
-
-
-###############################################################################
-# Ensure output exists
-###############################################################################
-
-if [[ ! -s "$REVIEW_JSON" ]]; then
-    die \
-        "Codex did not produce a review JSON file."
-fi
-
-
-###############################################################################
-# Deterministic output validation
-###############################################################################
-
-if ! jq -e \
-    --argjson changeset "$CURRENT_CHANGESET" \
-    '
-    type == "object"
-
-    and (.schemaVersion == 1)
-
-    and (.changeset == $changeset)
-
-    and (.summary | type == "string")
-
-    and (.findings | type == "array")
-
-    and (.limitations | type == "array")
-
-    and all(
-        .findings[];
-        (
-            (.id | type == "string")
-            and
-            (.severity | IN(
-                "critical",
-                "high",
-                "medium",
-                "low",
-                "info"
-            ))
-            and
-            (.category | type == "string")
-            and
-            (.file | type == "string")
-            and
-            (.title | type == "string")
-            and
-            (.description | type == "string")
-            and
-            (.impact | type == "string")
-            and
-            (.evidence | type == "string")
-            and
-            (.recommendation | type == "string")
-            and
-            (.confidence | IN(
-                "high",
-                "medium",
-                "low"
-            ))
-        )
-    )
-
-    and all(
-        .limitations[];
-        type == "string"
-    )
-    ' \
-    "$REVIEW_JSON" \
-    >/dev/null
-then
-    die \
-        "Codex output failed deterministic validation."
-fi
-
-
-###############################################################################
-# Deterministically calculate severity totals
-###############################################################################
-
-CRITICAL_COUNT="$(
-    jq '
-        [
-            .findings[]
-            | select(.severity == "critical")
-        ]
-        | length
-    ' "$REVIEW_JSON"
-)"
-
-HIGH_COUNT="$(
-    jq '
-        [
-            .findings[]
-            | select(.severity == "high")
-        ]
-        | length
-    ' "$REVIEW_JSON"
-)"
-
-MEDIUM_COUNT="$(
-    jq '
-        [
-            .findings[]
-            | select(.severity == "medium")
-        ]
-        | length
-    ' "$REVIEW_JSON"
-)"
-
-LOW_COUNT="$(
-    jq '
-        [
-            .findings[]
-            | select(.severity == "low")
-        ]
-        | length
-    ' "$REVIEW_JSON"
-)"
-
-INFO_COUNT="$(
-    jq '
-        [
-            .findings[]
-            | select(.severity == "info")
-        ]
-        | length
-    ' "$REVIEW_JSON"
-)"
-
-LIMITATION_COUNT="$(
-    jq '
-        .limitations
-        | length
-    ' "$REVIEW_JSON"
-)"
-
-
-###############################################################################
-# Human-readable review
-###############################################################################
-
+# The existing context is trusted only as helper-generated review objectives;
+# source content and metadata inside it remain untrusted.
+# Supply both the trusted prompt and review package through explicit stdin mode.
 {
-    printf \
-        '# Codex review - TFVC C%s\n\n' \
-        "$CURRENT_CHANGESET"
+    printf '%s\n' "$PROMPT"
+    printf '%s\n' '===== BEGIN REVIEW CONTEXT ====='
+    cat -- "$CONTEXT_FILE"
+    printf '\n%s\n' '===== END REVIEW CONTEXT ====='
+    printf '%s\n' '===== BEGIN UNTRUSTED MANIFEST DATA ====='
+    cat -- "$MANIFEST_FILE"
+    printf '\n%s\n' '===== END UNTRUSTED MANIFEST DATA ====='
+    printf '%s\n' '===== BEGIN UNTRUSTED UNIFIED DIFF ====='
+    cat -- "$DIFF_FILE"
+    printf '\n%s\n' '===== END UNTRUSTED UNIFIED DIFF ====='
+} > "$INPUT_FILE"
 
-    printf \
-        'Critical: %s  \nHigh: %s  \nMedium: %s  \nLow: %s  \nInfo: %s  \nLimitations: %s\n\n' \
-        "$CRITICAL_COUNT" \
-        "$HIGH_COUNT" \
-        "$MEDIUM_COUNT" \
-        "$LOW_COUNT" \
-        "$INFO_COUNT" \
-        "$LIMITATION_COUNT"
+CODEX_ARGS=(exec --ephemeral --skip-git-repo-check --cd "$WORK"
+    --sandbox read-only --ignore-rules --color never
+    --output-schema "$SCHEMA_FILE" --output-last-message "$RAW_REVIEW_JSON")
+printf 'Codex CLI version: '
+codex --version
+printf 'Running Azure Foundry Codex review for C%s...\n' "$CURRENT_CHANGESET"
+# Preserve the working provider configuration. Do not use --ignore-user-config:
+# it would bypass the isolated config containing the Azure provider.
+# inherit=none strips credentials from Codex-launched shell tools; this is not
+# an OS-level boundary against hostile processes running as the same user.
+if CODEX_HOME="$CODEX_HOME_DIR" AZURE_OPENAI_API_KEY="$AZURE_KEY" \
+    codex "${CODEX_ARGS[@]}" - < "$INPUT_FILE" > "$STDOUT_FILE" 2> "$STDERR_FILE"; then
+    AZURE_KEY=''
+else
+    codex_status=$?
+    AZURE_KEY=''
+    die "Codex execution failed (exit ${codex_status}). Raw diagnostics are withheld because they may contain secrets or source code."
+fi
+[[ -s $RAW_REVIEW_JSON ]] || die 'Codex did not produce review JSON.'
 
+# Validate exactly one JSON document and every schema field independently of Codex.
+if ! jq -se --argjson changeset "$CURRENT_CHANGESET" '
+    length == 1 and (.[0] |
+      type == "object"
+      and (keys == ["changeset","findings","limitations","schemaVersion","summary"])
+      and .schemaVersion == 1 and .changeset == $changeset
+      and (.summary | type == "string")
+      and (.findings | type == "array")
+      and (.limitations | type == "array")
+      and all(.findings[];
+        type == "object"
+        and (keys == ["category","confidence","description","evidence","file","id","impact","recommendation","severity","title"])
+        and all(.[]; type == "string")
+        and (.severity | IN("critical","high","medium","low","info"))
+        and (.confidence | IN("high","medium","low")))
+      and all(.limitations[]; type == "string"))
+' "$RAW_REVIEW_JSON" >/dev/null 2>&1; then
+    die 'Codex output failed deterministic validation.'
+fi
+# Only validated output reaches the artifact directory.
+jq '.' "$RAW_REVIEW_JSON" > "$REVIEW_JSON"
+chmod 600 "$REVIEW_JSON"
+CRITICAL_COUNT=$(jq '[.findings[] | select(.severity == "critical")] | length' "$REVIEW_JSON")
+HIGH_COUNT=$(jq '[.findings[] | select(.severity == "high")] | length' "$REVIEW_JSON")
+MEDIUM_COUNT=$(jq '[.findings[] | select(.severity == "medium")] | length' "$REVIEW_JSON")
+LOW_COUNT=$(jq '[.findings[] | select(.severity == "low")] | length' "$REVIEW_JSON")
+INFO_COUNT=$(jq '[.findings[] | select(.severity == "info")] | length' "$REVIEW_JSON")
+LIMITATION_COUNT=$(jq '.limitations | length' "$REVIEW_JSON")
+GATE_STATUS=pass
+if (( CRITICAL_COUNT > 0 || HIGH_COUNT > 0 || LIMITATION_COUNT > 0 )); then
+    GATE_STATUS=fail
+fi
+readonly GATE_STATUS
+
+# Deterministic Markdown; encode model text as HTML entities to prevent active
+# markup/links from source-controlled strings when the report is rendered.
+{
+    printf '# Codex review - TFVC C%s\n\n' "$CURRENT_CHANGESET"
+    printf 'Gate: %s\n\nCritical: %s  \nHigh: %s  \nMedium: %s  \nLow: %s  \nInfo: %s  \nLimitations: %s\n\n' \
+        "$GATE_STATUS" "$CRITICAL_COUNT" "$HIGH_COUNT" "$MEDIUM_COUNT" "$LOW_COUNT" "$INFO_COUNT" "$LIMITATION_COUNT"
     jq -r '
-        "## Summary\n\n"
-        + .summary
-        + "\n\n"
-        +
-        (
-            if (.findings | length) == 0 then
-
-                "## Findings\n\nNo findings reported.\n"
-
-            else
-
-                "## Findings\n\n"
-                +
-                (
-                    [
-                        .findings[]
-                        |
-                        "### [\(.severity | ascii_upcase)] \(.id): \(.title)\n\n"
-                        + "- File: `\(.file)`\n"
-                        + "- Category: \(.category)\n"
-                        + "- Confidence: \(.confidence)\n\n"
-                        + "\(.description)\n\n"
-                        + "**Impact:** \(.impact)\n\n"
-                        + "**Recommendation:** \(.recommendation)\n"
-                    ]
-                    | join("\n")
-                )
-
-            end
-        )
-        +
-        (
-            if (.limitations | length) == 0 then
-
-                ""
-
-            else
-
-                "\n\n## Review limitations\n\n"
-                +
-                (
-                    [
-                        .limitations[]
-                        | "- " + .
-                    ]
-                    | join("\n")
-                )
-                +
-                "\n"
-
-            end
-        )
+      def safe: explode | map("&#" + tostring + ";") | join("");
+      "## Summary\n\n" + (.summary | safe) + "\n\n## Findings\n\n",
+      (if (.findings | length) == 0 then "No findings reported.\n" else
+        .findings[] |
+        "### [" + (.severity | ascii_upcase) + "] " + (.id | safe) + ": " + (.title | safe) + "\n\n"
+        + "- File: " + (.file | safe) + "\n"
+        + "- Category: " + (.category | safe) + "\n"
+        + "- Confidence: " + .confidence + "\n\n"
+        + (.description | safe) + "\n\n"
+        + "**Impact:** " + (.impact | safe) + "\n\n"
+        + "**Evidence:** " + (.evidence | safe) + "\n\n"
+        + "**Recommendation:** " + (.recommendation | safe) + "\n"
+      end),
+      "\n## Limitations\n",
+      (if (.limitations | length) == 0 then "None reported."
+       else .limitations[] | "- " + safe end)
     ' "$REVIEW_JSON"
-
 } > "$REVIEW_MD"
+chmod 600 "$REVIEW_MD"
 
+SKILL_ROOT="$WORK/.agents/skills/security-review-html"
+mkdir -p -- "$WORK/.agents/skills"
+mv -- "$SKILL_STAGE" "$SKILL_ROOT"
+# Future HTML pass belongs here, before final gate enforcement. No HTML pass is
+# implemented. It must consume validated facts and GATE_STATUS without changing
+# findings, severities, counts or policy, and validate its output before publishing.
+# The prepared skill and isolated config are removed by cleanup on exit.
 
-###############################################################################
-# Azure DevOps output variables
-###############################################################################
-
-printf \
-    'Codex findings: critical=%s high=%s medium=%s low=%s info=%s limitations=%s\n' \
-    "$CRITICAL_COUNT" \
-    "$HIGH_COUNT" \
-    "$MEDIUM_COUNT" \
-    "$LOW_COUNT" \
-    "$INFO_COUNT" \
-    "$LIMITATION_COUNT"
-
-printf \
-    '##vso[task.setvariable variable=CODEX_REVIEW_FILE]%s\n' \
-    "$(escape_vso "$REVIEW_JSON")"
-
-printf \
-    '##vso[task.setvariable variable=CODEX_REVIEW_MD_FILE]%s\n' \
-    "$(escape_vso "$REVIEW_MD")"
-
-printf \
-    '##vso[task.setvariable variable=CODEX_CRITICAL_COUNT]%s\n' \
-    "$CRITICAL_COUNT"
-
-printf \
-    '##vso[task.setvariable variable=CODEX_HIGH_COUNT]%s\n' \
-    "$HIGH_COUNT"
-
-printf \
-    '##vso[task.setvariable variable=CODEX_MEDIUM_COUNT]%s\n' \
-    "$MEDIUM_COUNT"
-
-printf \
-    '##vso[task.setvariable variable=CODEX_LOW_COUNT]%s\n' \
-    "$LOW_COUNT"
-
-printf \
-    '##vso[task.setvariable variable=CODEX_INFO_COUNT]%s\n' \
-    "$INFO_COUNT"
-
-printf \
-    '##vso[task.setvariable variable=CODEX_LIMITATION_COUNT]%s\n' \
-    "$LIMITATION_COUNT"
-
-
-###############################################################################
-# Surface actionable findings
-###############################################################################
-
-while IFS=$'\t' read -r severity file title
-do
-    [[ -n "$severity" ]] || continue
-
+set_variable CODEX_REVIEW_FILE "$REVIEW_JSON"
+set_variable CODEX_REVIEW_MD_FILE "$REVIEW_MD"
+set_variable CODEX_CRITICAL_COUNT "$CRITICAL_COUNT"
+set_variable CODEX_HIGH_COUNT "$HIGH_COUNT"
+printf 'Codex findings: critical=%s high=%s medium=%s low=%s info=%s limitations=%s\n' \
+    "$CRITICAL_COUNT" "$HIGH_COUNT" "$MEDIUM_COUNT" "$LOW_COUNT" "$INFO_COUNT" "$LIMITATION_COUNT"
+# Materialize first so jq failures cannot be hidden by process substitution.
+jq -r '.findings[] | [.severity,.file,.title] | @tsv' "$REVIEW_JSON" > "$WORK/findings.tsv"
+while IFS=$'\t' read -r severity file title; do
     case "$severity" in
-
-        critical|high)
-
-            log_error \
-                "Codex ${severity}: ${file}: ${title}"
-
-            ;;
-
-        medium)
-
-            log_warning \
-                "Codex medium: ${file}: ${title}"
-
-            ;;
-
+        critical|high) log_error "Codex ${severity}: ${file}: ${title}" ;;
+        medium) log_warning "Codex medium: ${file}: ${title}" ;;
     esac
-
-done < <(
-    jq -r '
-        .findings[]
-        |
-        [
-            .severity,
-            (
-                .file
-                | gsub("[\\t\\r\\n]"; " ")
-            ),
-            (
-                .title
-                | gsub("[\\t\\r\\n]"; " ")
-            )
-        ]
-        |
-        @tsv
-    ' "$REVIEW_JSON"
-)
-
-
-###############################################################################
-# Fail closed on review limitations
-###############################################################################
-
-if (( LIMITATION_COUNT > 0 )); then
-
-    log_error \
-        "Codex reported ${LIMITATION_COUNT} review limitation(s). Manual review is required."
-
-    exit 1
+done < "$WORK/findings.tsv"
+if [[ $GATE_STATUS == fail ]]; then
+    die "Codex gate failed: ${CRITICAL_COUNT} critical, ${HIGH_COUNT} high, ${LIMITATION_COUNT} limitation(s)."
 fi
+set_variable CODEX_REVIEW_GATE pass
+printf 'Codex security gate passed.\n'
 
 
-###############################################################################
-# Deterministic security gate
-###############################################################################
 
-if (( CRITICAL_COUNT > 0 || HIGH_COUNT > 0 )); then
-
-    die \
-        "Codex security gate failed: ${CRITICAL_COUNT} critical and ${HIGH_COUNT} high finding(s)."
-fi
-
-
-###############################################################################
-# Security gate passed
-###############################################################################
-
-printf \
-    '##vso[task.setvariable variable=CODEX_REVIEW_GATE]pass\n'
-
-printf \
-    'Codex security gate passed.\n'
