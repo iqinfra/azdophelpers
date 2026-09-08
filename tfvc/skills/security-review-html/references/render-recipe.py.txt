@@ -1,0 +1,210 @@
+# Canonical report rendering recipe (instructions, not executable code)
+
+Follow this recipe exactly. The independent validator reconstructs the same
+tree from the three JSON inputs. Use the `report-template.html` stylesheet
+verbatim: copy the characters between `<style id="report-style">` and its
+closing tag, after normalizing CRLF/CR to LF. Do not change CSS whitespace,
+selectors, colors, media queries, or comments.
+
+## Escaping and scalar rules
+
+Normalize every supplied string's CRLF and CR line endings to LF. Escape text
+characters `&`, `<`, and `>` (and escape `"` and `'` when placing a value in an
+attribute). Do not interpret any supplied value as markup. Convert JSON
+booleans to `True` and `False`, numbers to their decimal spelling, and null to
+the fixed text `None`. A non-null scalar in a normal `dd` is one text node.
+A non-null prose field in a finding detail is one `pre` whose content is one
+artificial LF followed by the exact escaped string. HTML5 removes the first LF
+in a `pre`; this sentinel preserves a supplied leading LF as data. A null
+prose field is `p.empty` containing `None`.
+
+An empty list is `p.empty` containing `None`. A non-empty list is
+`ul.list-plain` containing one `li.list-item` per input item, in input order.
+Standards list items are the escaped string `{id} — {name}`. Finding
+`securityRelevant` is displayed as the lowercase word `yes` or `no`.
+
+Sort findings by `critical`, `high`, `medium`, `low`, `info`; keep original
+order for equal severities. The zero-based sorted position is the anchor number
+`N` in both `href="#finding-N"` and `id="finding-N"`.
+
+## Exact document recipe
+
+Emit `<!doctype html>`, then:
+
+```html
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; img-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Codex security review · TFVC C{review.changeset}</title>
+<style id="report-style">{exact template stylesheet}</style>
+</head><body>
+<main id="report" data-report-kind="codex">{sections}</main>
+</body></html>
+```
+
+`sections` are concatenated in this order. Wrapper attributes and child order
+are fixed; indentation is optional.
+
+### Header
+
+```html
+<header id="report-header">
+<p class="eyebrow">Security &amp; code review</p>
+<h1>TFVC changeset C{review.changeset}</h1>
+<p><span class="badge {meta.securityDecision}">SECURITY DECISION: {UPPER}</span><span class="report-status {meta.reportStatus}">REPORT: {UPPER}</span></p>
+<dl>
+  <dt>Review root</dt><dd>{meta.reviewRoot}</dd>
+  <dt>Previous changeset</dt><dd>C{meta.previousChangeset}</dd>
+  <dt>Deployment</dt><dd>{meta.provenance.deployment}</dd>
+  <dt>Reasoning effort</dt><dd>{meta.provenance.reasoningEffort}</dd>
+  <dt>Total findings</dt><dd>{meta.counts.totalFindings}</dd>
+</dl>
+<div class="metrics">
+  <div class="metric critical"><span>Critical</span><strong>{count}</strong></div>
+  <div class="metric high"><span>High</span><strong>{count}</strong></div>
+  <div class="metric medium"><span>Medium</span><strong>{count}</strong></div>
+  <div class="metric low"><span>Low</span><strong>{count}</strong></div>
+  <div class="metric info"><span>Info</span><strong>{count}</strong></div>
+  <div class="metric {fail-or-pass}"><span>Limitations</span><strong>{count}</strong></div>
+</div>
+</header>
+```
+
+The first `UPPER` is `meta.securityDecision.upper()` and the second is
+`meta.reportStatus.upper()`. Each count is its matching `meta.counts` field.
+`fail-or-pass` is `fail` when `meta.counts.limitations > 0`, otherwise `pass`.
+
+For a fallback, insert immediately before the header `dl`:
+
+```html
+<p class="fallback-banner">Deterministic fallback report: the Codex HTML presentation pass failed or was rejected; this document presents validated facts only.</p>
+```
+
+The fallback changes `data-report-kind` to `fallback`, uses
+`class="report-status fallback"` for the report-status badge, inserts that
+banner, and uses the same authoritative values and stylesheet.
+
+### Coverage
+
+```html
+<section id="coverage"><h2>Coverage</h2><dl>
+  <dt>reviewComplete</dt><dd>{manifest.coverage.reviewComplete}</dd>
+  <dt>enumeratedChanges</dt><dd>{...}</dd>
+  <dt>inScopeChanges</dt><dd>{...}</dd>
+  <dt>outOfScopeChanges</dt><dd>{...}</dd>
+  <dt>unreviewableChanges</dt><dd>{...}</dd>
+  <dt>filesWithTextDiff</dt><dd>{...}</dd>
+  <dt>diffBytes</dt><dd>{...}</dd>
+  <dt>diffLines</dt><dd>{...}</dd>
+</dl><h3>Manifest metadata</h3><dl>
+  <dt>schemaVersion</dt><dd>{manifest.schemaVersion}</dd>
+  <dt>normalizationVersion</dt><dd>{manifest.normalizationVersion}</dd>
+  <dt>helperVersion</dt><dd>{manifest.helperVersion}</dd>
+  <dt>apiVersion</dt><dd>{manifest.apiVersion}</dd>
+  <dt>changeset</dt><dd>{manifest.changeset}</dd>
+  <dt>previousChangeset</dt><dd>{manifest.previousChangeset}</dd>
+  <dt>reviewRoot</dt><dd>{manifest.reviewRoot}</dd>
+</dl><h3>Review paths</h3>{reviewPathsList}</section>
+```
+
+The coverage fields and identity fields stay in the listed order. `reviewPaths`
+is a `ul.list-plain` with `li.list-item` children.
+
+### Changed files and summary
+
+Use one `article.file-card` per `manifest.files` item, in manifest order:
+
+```html
+<section id="changed-files"><h2>Changed files</h2>
+<article class="file-card"><h3>Change {index}: {path}</h3><dl>
+  <dt>index</dt><dd>...</dd><dt>changeType</dt><dd>...</dd>
+  <dt>classification</dt><dd>...</dd><dt>path</dt><dd>...</dd>
+  <dt>sourceServerItem</dt><dd>...</dd><dt>oldPath</dt><dd>...</dd>
+  <dt>newPath</dt><dd>...</dd><dt>oldSize</dt><dd>...</dd>
+  <dt>newSize</dt><dd>...</dd><dt>oldHash</dt><dd>...</dd>
+  <dt>newHash</dt><dd>...</dd><dt>reviewable</dt><dd>...</dd>
+  <dt>textDiff</dt><dd>...</dd><dt>reason</dt><dd>...</dd>
+</dl></article>
+</section>
+<section id="summary"><h2>Summary</h2><pre>\n{review.summary}</pre></section>
+```
+
+### Findings overview and details
+
+When findings are present, the overview is exactly:
+
+```html
+<section id="findings-overview"><h2>Findings overview</h2>
+<div class="table-wrap"><table class="findings-table"><thead><tr>
+<th>ID</th><th>Severity</th><th>Security</th><th>Finding</th><th>File</th><th>Confidence</th>
+</tr></thead><tbody>{rows}</tbody></table></div></section>
+```
+
+When there are no findings, emit instead:
+
+```html
+<section id="findings-overview"><h2>Findings overview</h2><p class="empty">No findings reported.</p></section>
+```
+
+Each row is exactly (with escaped data and the sorted anchor number):
+
+```html
+<tr><td><a href="#finding-N">{id}</a></td><td class="{severity}">{UPPER SEVERITY}</td><td>{yes-or-no}</td><td>{title}</td><td>{file}</td><td>{confidence}</td></tr>
+```
+
+For each sorted finding, emit:
+
+```html
+<article id="finding-N" class="finding-card">
+<span class="badge {severity}">{UPPER SEVERITY}</span>
+<h2 class="finding-title">{id} · {title}</h2>
+<p class="meta">File: {file}</p>
+<dl>
+<dt>Category</dt><dd>{category}</dd>
+<dt>Security relevant</dt><dd>yes/no</dd>
+<dt>Confidence</dt><dd>{confidence}</dd>
+<dt>Symbol</dt><dd>{None paragraph or prose}</dd>
+<dt>Description</dt><dd>{pre or None paragraph}</dd>
+<dt>Change analysis</dt><dd>{pre or None paragraph}</dd>
+<dt>Security boundary</dt><dd>{pre or None paragraph}</dd>
+<dt>Attack scenario</dt><dd>{pre or None paragraph}</dd>
+<dt>Exploitability</dt><dd>{pre or None paragraph}</dd>
+<dt>Impact</dt><dd>{pre or None paragraph}</dd>
+<dt>Evidence summary</dt><dd>{pre}</dd>
+<dt>Evidence before</dt><dd>{pre or None paragraph}</dd>
+<dt>Evidence after</dt><dd>{pre or None paragraph}</dd>
+<dt>Recommendation</dt><dd>{pre}</dd>
+<dt>Remediation example</dt><dd>{pre or None paragraph}</dd>
+<dt>Verification steps</dt><dd>{list rendering}</dd>
+<dt>Standards</dt><dd>{list rendering}</dd>
+</dl></article>
+```
+
+The `Symbol` scalar is a normal `dd` text node when non-null. All other
+nullable or multiline prose follows the `pre`/`p.empty` rule. There is no
+additional narrative between sections.
+
+### Trailing sections
+
+Append, in order, the limitations section, gate policy, audit metadata, and
+footer. Their exact `dl` label orders are specified in `report-contract.md`.
+Use `<section id="limitations"><h2>Limitations</h2>...</section>`,
+`<section id="gate-policy"><h2>Gate policy</h2><dl>...</dl></section>`, and
+`<section id="audit-metadata"><h2>Audit metadata</h2><dl>...</dl></section>`.
+Limitations use the fixed list recipe, except that an empty array uses
+`<p class="empty">None reported.</p>`. For the gate policy, display blocking
+severities joined by comma and space (`critical, high`), and use the supplied
+policy and metadata values for the remaining labels. Audit format values come
+from `meta.formats`, provenance and hashes from `meta.provenance`, and the
+version/status from `meta.metaVersion` and `meta.reportStatus`.
+Use `footer#report-footer` for the footer. The footer text is exactly:
+
+```text
+Schema v{reviewSchema} · Metadata v{metadataSchema} · HTML contract v{htmlContract} · Generated {generatedAt} · Helper {helperCommit}
+```
+
+Do not add Markdown fences, a preamble, comments, unsupplied source excerpts, links other
+than the local finding anchors, or any element/attribute not described here.
+
+In HTML examples, `\n` immediately after `<pre>` denotes one actual LF character, not a backslash and letter n. Never include placeholders or ellipses in emitted HTML.

@@ -1,0 +1,239 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/iqinfra/azdophelpers/tfvc/schemas/review-v2.schema.json",
+  "title": "TFVC Codex security review v2",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "enum": [2]
+    },
+    "changeset": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 12000
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4000
+      }
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "changeset",
+    "summary",
+    "findings",
+    "limitations"
+  ],
+  "$defs": {
+    "nullableText": {
+      "anyOf": [
+        {
+          "type": "string",
+          "maxLength": 12000
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "critical",
+            "high",
+            "medium",
+            "low",
+            "info"
+          ]
+        },
+        "category": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 12000
+        },
+        "impact": {
+          "type": "string",
+          "maxLength": 12000
+        },
+        "securityRelevant": {
+          "type": "boolean"
+        },
+        "symbol": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 512
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "changeAnalysis": {
+          "$ref": "#/$defs/nullableText"
+        },
+        "securityBoundary": {
+          "$ref": "#/$defs/nullableText"
+        },
+        "attackScenario": {
+          "$ref": "#/$defs/nullableText"
+        },
+        "exploitability": {
+          "$ref": "#/$defs/nullableText"
+        },
+        "evidence": {
+          "$ref": "#/$defs/evidence"
+        },
+        "remediationExample": {
+          "$ref": "#/$defs/nullableText"
+        },
+        "verificationSteps": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "standards": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "$ref": "#/$defs/standard"
+          }
+        },
+        "recommendation": {
+          "type": "string",
+          "maxLength": 12000
+        },
+        "confidence": {
+          "type": "string",
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "severity",
+        "category",
+        "file",
+        "title",
+        "description",
+        "impact",
+        "securityRelevant",
+        "symbol",
+        "changeAnalysis",
+        "securityBoundary",
+        "attackScenario",
+        "exploitability",
+        "evidence",
+        "remediationExample",
+        "verificationSteps",
+        "standards",
+        "recommendation",
+        "confidence"
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 12000
+        },
+        "before": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 12000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "after": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 12000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "summary",
+        "before",
+        "after"
+      ]
+    },
+    "standard": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ]
+    }
+  }
+}
