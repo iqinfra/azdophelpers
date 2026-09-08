@@ -6,6 +6,20 @@ verbatim: copy the characters between `<style id="report-style">` and its
 closing tag, after normalizing CRLF/CR to LF. Do not change CSS whitespace,
 selectors, colors, media queries, or comments.
 
+The caller may provide a canonical `report-scaffold.html` rendered from the
+same validated inputs. Treat it as an exact formatting reference and reproduce
+its complete document. If a caller supplies a structural validation diagnostic,
+use only that value-free path/type signal to correct markup against the
+scaffold. Never copy facts from the diagnostic, create missing facts, or alter
+the validated JSON values. The caller may retry once, but only an independently
+validated candidate is a successful presentation report.
+
+The caller may also provide `source-locations.json`, a deterministic map bound
+to the review and diff SHA-256 values. Use its validated `before` and `after`
+path/range entries only under the fixed source-location labels. A null entry
+or absent map must render exactly `Unavailable in supplied diff`; never infer a
+line or range from the HTML, evidence prose, or finding file text.
+
 ## Escaping and scalar rules
 
 Normalize every supplied string's CRLF and CR line endings to LF. Escape text
@@ -26,6 +40,12 @@ Standards list items are the escaped string `{id} — {name}`. Finding
 Sort findings by `critical`, `high`, `medium`, `low`, `info`; keep original
 order for equal severities. The zero-based sorted position is the anchor number
 `N` in both `href="#finding-N"` and `id="finding-N"`.
+
+Finding file paths, source line/range references, and before/after snippets are
+authoritative only when present in the validated finding values. Keep those
+values verbatim under their labels. This pass has no diff and must not infer a
+line number, path alias, snippet, impact, recommendation, remediation example,
+or verification step.
 
 ## Exact document recipe
 
@@ -174,6 +194,8 @@ For each sorted finding, emit:
 <dt>Evidence summary</dt><dd>{pre}</dd>
 <dt>Evidence before</dt><dd>{pre or None paragraph}</dd>
 <dt>Evidence after</dt><dd>{pre or None paragraph}</dd>
+<dt>Source location (before)</dt><dd>{path:start-end or Unavailable in supplied diff}</dd>
+<dt>Source location (after)</dt><dd>{path:start-end or Unavailable in supplied diff}</dd>
 <dt>Recommendation</dt><dd>{pre}</dd>
 <dt>Remediation example</dt><dd>{pre or None paragraph}</dd>
 <dt>Verification steps</dt><dd>{list rendering}</dd>

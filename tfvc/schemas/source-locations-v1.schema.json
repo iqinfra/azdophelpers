@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/iqinfra/azdophelpers/tfvc/schemas/source-locations-v1.schema.json",
+  "title": "TFVC Codex source locations v1",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "type": "integer", "enum": [1] },
+    "changeset": { "type": "integer", "minimum": 1 },
+    "reviewSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "diffSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "locations": {
+      "type": "object",
+      "maxProperties": 500,
+      "propertyNames": { "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" },
+      "additionalProperties": { "$ref": "#/$defs/location" }
+    }
+  },
+  "required": ["schemaVersion", "changeset", "reviewSha256", "diffSha256", "locations"],
+  "$defs": {
+    "lineRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^\\$/[^\\r\\n\\t]+$",
+          "maxLength": 2000
+        },
+        "startLine": { "type": "integer", "minimum": 1 },
+        "endLine": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["path", "startLine", "endLine"]
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "before": {
+          "anyOf": [{ "$ref": "#/$defs/lineRange" }, { "type": "null" }]
+        },
+        "after": {
+          "anyOf": [{ "$ref": "#/$defs/lineRange" }, { "type": "null" }]
+        }
+      },
+      "required": ["before", "after"]
+    }
+  }
+}

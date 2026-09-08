@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import sys
 import tempfile
@@ -156,6 +157,188 @@ class ReportHtmlTests(unittest.TestCase):
         mutated = candidate.replace("</span></p>", "</span>UNASSIGNED TEXT</p>", 1)
         with self.assertRaises(report_html.ReportError):
             report_html.validate_report_with_values(self.review, self.meta, self.manifest, self.template, mutated.encode())
+
+    def test_dom_mismatch_diagnostic_is_structural_and_value_free(self) -> None:
+        candidate = report_html.render_document(self.review, self.meta, self.manifest, self.template)
+        mutated = candidate.replace("A high finding.", "MODEL-ONLY-UNTRUSTED", 1)
+        with self.assertRaises(report_html.ReportError) as context:
+            report_html.validate_report_with_values(
+                self.review,
+                self.meta,
+                self.manifest,
+                self.template,
+                mutated.encode(),
+            )
+        message = str(context.exception)
+        self.assertIn("candidate HTML does not exactly match", message)
+        self.assertIn("/html", message)
+        self.assertIn("text differs", message)
+        self.assertNotIn("MODEL-ONLY-UNTRUSTED", message)
+
+    def test_canonical_scaffold_copy_is_accepted_but_markup_rewrite_is_not(self) -> None:
+        scaffold = report_html.render_document(self.review, self.meta, self.manifest, self.template)
+        report_html.validate_report_with_values(
+            self.review,
+            self.meta,
+            self.manifest,
+            self.template,
+            scaffold.encode(),
+        )
+        rewritten = scaffold.replace("<pre>\nA high finding.</pre>", "<p>A high finding.</p>", 1)
+        with self.assertRaises(report_html.ReportError):
+            report_html.validate_report_with_values(
+                self.review,
+                self.meta,
+                self.manifest,
+                self.template,
+                rewritten.encode(),
+            )
+
+    def test_diff_grounded_source_locations_are_rendered_and_hash_bound(self) -> None:
+        locations = {
+            "schemaVersion": 1,
+            "changeset": self.review["changeset"],
+            "reviewSha256": "d" * 64,
+            "diffSha256": "e" * 64,
+            "locations": {
+                "F-low": {"before": None, "after": None},
+                "F-high": {
+                    "before": {
+                        "path": "$/test/Solution1/src/Example.cs",
+                        "startLine": 12,
+                        "endLine": 13,
+                    },
+                    "after": {
+                        "path": "$/test/Solution1/src/Example.cs",
+                        "startLine": 14,
+                        "endLine": 14,
+                    },
+                },
+            },
+        }
+        meta = copy.deepcopy(self.meta)
+        meta["provenance"]["hashes"]["review"] = "d" * 64
+        meta["provenance"]["hashes"]["diff"] = "e" * 64
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source-locations.json"
+            path.write_text(json.dumps(locations), encoding="utf-8")
+            entries = report_html.load_source_locations(path, self.review, meta, self.manifest)
+        candidate = report_html.render_document(
+            self.review,
+            meta,
+            self.manifest,
+            self.template,
+            locations=entries,
+        )
+        report_html.validate_report_with_values(
+            self.review,
+            meta,
+            self.manifest,
+            self.template,
+            candidate.encode(),
+            locations=entries,
+        )
+        self.assertIn("<dt>Source location (before)</dt>", candidate)
+        self.assertIn("$/test/Solution1/src/Example.cs:12-13", candidate)
+        self.assertIn("$/test/Solution1/src/Example.cs:14", candidate)
+        self.assertEqual(candidate.count(report_html.SOURCE_LOCATION_UNAVAILABLE), 2)
+
+        meta["provenance"]["hashes"]["review"] = "f" * 64
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source-locations.json"
+            path.write_text(json.dumps(locations), encoding="utf-8")
+            with self.assertRaises(report_html.ReportError):
+                report_html.load_source_locations(path, self.review, meta, self.manifest)
+
+    def test_cli_locations_argument_validates_hashes_and_renders_ranges(self) -> None:
+        locations = {
+            "schemaVersion": 1,
+            "changeset": self.review["changeset"],
+            "reviewSha256": "0" * 64,
+            "diffSha256": "1" * 64,
+            "locations": {
+                finding["id"]: {
+                    "before": None,
+                    "after": {
+                        "path": "$/test/Solution1/src/Example.cs",
+                        "startLine": 7,
+                        "endLine": 9,
+                    },
+                }
+                for finding in self.review["findings"]
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            review_path = root / "review.json"
+            manifest_path = root / "manifest.json"
+            meta_path = root / "meta.json"
+            template_path = root / "template.html"
+            locations_path = root / "source-locations.json"
+            candidate_path = root / "candidate.html"
+            review_path.write_text(json.dumps(self.review), encoding="utf-8")
+            manifest_path.write_text(json.dumps(self.manifest), encoding="utf-8")
+            template_path.write_text(self.template, encoding="utf-8")
+            meta = copy.deepcopy(self.meta)
+            meta["provenance"]["hashes"]["review"] = hashlib.sha256(review_path.read_bytes()).hexdigest()
+            meta["provenance"]["hashes"]["normalizedManifest"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            meta["provenance"]["hashes"]["template"] = hashlib.sha256(template_path.read_bytes()).hexdigest()
+            meta_path.write_text(json.dumps(meta), encoding="utf-8")
+            locations["reviewSha256"] = meta["provenance"]["hashes"]["review"]
+            locations["diffSha256"] = meta["provenance"]["hashes"]["diff"]
+            locations_path.write_text(json.dumps(locations), encoding="utf-8")
+
+            rendered = report_html.render_document(
+                self.review,
+                meta,
+                self.manifest,
+                self.template,
+                locations=locations["locations"],
+            )
+            candidate_path.write_text(rendered, encoding="utf-8")
+            self.assertEqual(
+                report_html.main(
+                    [
+                        "validate",
+                        "--review",
+                        str(review_path),
+                        "--meta",
+                        str(meta_path),
+                        "--manifest",
+                        str(manifest_path),
+                        "--template",
+                        str(template_path),
+                        "--locations",
+                        str(locations_path),
+                        "--input",
+                        str(candidate_path),
+                    ]
+                ),
+                0,
+            )
+
+            output_path = root / "scaffold.html"
+            self.assertEqual(
+                report_html.main(
+                    [
+                        "render",
+                        "--review",
+                        str(review_path),
+                        "--meta",
+                        str(meta_path),
+                        "--manifest",
+                        str(manifest_path),
+                        "--template",
+                        str(template_path),
+                        "--locations",
+                        str(locations_path),
+                        "--output",
+                        str(output_path),
+                    ]
+                ),
+                0,
+            )
+            self.assertIn("$/test/Solution1/src/Example.cs:7-9", output_path.read_text(encoding="utf-8"))
 
     def test_whitespace_only_evidence_change_is_rejected(self) -> None:
         candidate = report_html.render_document(self.review, self.meta, self.manifest, self.template)

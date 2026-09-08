@@ -275,6 +275,9 @@ record = {
     "promptHasSkill": "$security-review-html" in prompt,
     "promptHasDiff": "fixture diff" in prompt,
     "promptHasManifest": "review-manifest" in prompt,
+    "promptHasScaffold": "report-scaffold.html" in prompt,
+    "promptHasLocations": "source-locations.json" in prompt,
+    "promptHasRetryFeedback": "sanitized feedback" in prompt,
     "hasSchema": "--output-schema" in sys.argv,
     "isolatedFlags": all(flag in sys.argv for flag in ("--ephemeral", "--sandbox", "read-only", "--ignore-rules")),
 }
@@ -324,6 +327,12 @@ else:
     if (work / ".agents/skills/security-review-html/SKILL.md").is_file() is False:
         print("fixture codex: HTML pass did not receive the pinned skill", file=sys.stderr)
         raise SystemExit(10)
+    if (work / "report-scaffold.html").is_file() is False:
+        print("fixture codex: HTML pass did not receive the validated scaffold", file=sys.stderr)
+        raise SystemExit(14)
+    if (work / "source-locations.json").is_file() is False:
+        print("fixture codex: HTML pass did not receive source locations", file=sys.stderr)
+        raise SystemExit(15)
     if "fixture diff" in prompt or "codex-context" in prompt:
         print("fixture codex: HTML pass received the original review package", file=sys.stderr)
         raise SystemExit(11)
@@ -344,12 +353,17 @@ else:
     # Use the pinned renderer's canonical command as a deterministic fixture
     # generator.  This keeps the fake model response inside the same HTML
     # contract that the helper independently validates.
-    if CASE == "invalid-html":
+    previous_records = json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else []
+    html_attempt = sum(record.get("kind") == "html" for record in previous_records)
+    if CASE == "html-no-output":
+        pass
+    elif CASE == "invalid-html" or (CASE == "html-retry-pass" and html_attempt == 0):
         candidate.write_text("<!doctype html><html><head></head><body><script>alert(1)</script></body></html>", encoding="utf-8")
     else:
         renderer = PACKAGE / "scripts/report_html.py"
         template = PACKAGE / "skills/security-review-html/assets/report-template.html"
-        command = ["python3", "-I", str(renderer), "render", "--review", str(review), "--meta", str(meta), "--manifest", str(manifest), "--template", str(template), "--output", str(candidate), "--kind", "codex"]
+        locations = work / "source-locations.json"
+        command = ["python3", "-I", str(renderer), "render", "--review", str(review), "--meta", str(meta), "--manifest", str(manifest), "--template", str(template), "--locations", str(locations), "--output", str(candidate), "--kind", "codex"]
         result = subprocess.run(command, text=True, capture_output=True)
         if result.returncode != 0:
             print(result.stderr or result.stdout, file=sys.stderr)
@@ -477,6 +491,7 @@ class PipelineTests(unittest.TestCase):
             f"tfvc-changeset-{CHANGESET}-codex-review.html",
             "report-meta.json",
             "review-manifest.json",
+            "source-locations.json",
         }
         self.assertTrue(harness.report_dir.is_dir())
         self.assertTrue(expected.issubset(harness.outputs()), harness.outputs())
@@ -499,6 +514,9 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(records[1]["promptHasSkill"])
         self.assertFalse(records[1]["promptHasDiff"])
         self.assertTrue(records[1]["promptHasManifest"])
+        self.assertTrue(records[1]["promptHasScaffold"])
+        self.assertTrue(records[1]["promptHasLocations"])
+        self.assertFalse(records[1]["promptHasRetryFeedback"])
         self.assertNotEqual(records[0]["home"], records[1]["home"])
         self.assertNotEqual(records[0]["work"], records[1]["work"])
         self.assertIn("artifact.upload", result.stdout)
@@ -551,8 +569,43 @@ class PipelineTests(unittest.TestCase):
                 fallback = harness.report_dir / "codex-review-fallback.html"
                 self.assertTrue(fallback.is_file(), "a valid analysis must produce the labeled fallback")
                 self.assertIn("fallback", fallback.read_text(encoding="utf-8").lower())
+                diagnostic = json.loads((harness.report_dir / "report-diagnostic.json").read_text(encoding="utf-8"))
+                self.assertEqual(diagnostic["schemaVersion"], 1)
+                self.assertTrue(diagnostic["failures"])
+                self.assertTrue(all(set(item) == {"stage", "code", "exitCode", "action"} for item in diagnostic["failures"]))
+                self.assertNotIn("fixture", json.dumps(diagnostic))
+                if case == "render-fail":
+                    self.assertEqual([item["code"] for item in diagnostic["failures"]], ["HTML_CLI_EXIT"])
+                else:
+                    self.assertEqual(
+                        [item["code"] for item in diagnostic["failures"]],
+                        ["HTML_VALIDATION_FAILED", "HTML_RETRY_VALIDATION_FAILED"],
+                    )
                 self.assertIn("HTML generation or validation failed", result.stdout)
                 self.assert_clean_temp(harness)
+
+    def test_html_retry_recovers_after_validation_rejection(self) -> None:
+        harness, result = self.run_case("html-retry-pass")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_common_success_outputs(harness)
+        self.assertNotIn("report-diagnostic.json", harness.outputs())
+        self.assertEqual([record["kind"] for record in harness.state_records()], ["analysis", "html", "html"])
+        records = harness.state_records()
+        self.assertTrue(records[1]["promptHasLocations"])
+        self.assertTrue(records[2]["promptHasRetryFeedback"])
+        self.assertIn("CODEX_REVIEW_GATE]pass", result.stdout)
+        self.assertIn("HTML reporting pass recovered after one bounded retry", result.stdout)
+        self.assert_clean_temp(harness)
+
+    def test_html_no_output_publishes_actionable_diagnostic(self) -> None:
+        harness, result = self.run_case("html-no-output")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        diagnostic = json.loads((harness.report_dir / "report-diagnostic.json").read_text(encoding="utf-8"))
+        self.assertEqual([item["code"] for item in diagnostic["failures"]], ["HTML_NO_OUTPUT"])
+        self.assertEqual(diagnostic["failures"][0]["exitCode"], 0)
+        self.assertIn("output-last-message", diagnostic["failures"][0]["action"])
+        self.assertNotIn("report.candidate", result.stdout)
+        self.assert_clean_temp(harness)
 
     def test_html_pass_cannot_mutate_authoritative_inputs(self) -> None:
         harness, result = self.run_case("html-mutate")

@@ -3,7 +3,9 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -17,6 +19,14 @@ class LauncherTests(unittest.TestCase):
             temp.mkdir()
             bin_dir = root / 'bin'
             bin_dir.mkdir()
+            runtime = root / 'runtime'
+            (runtime / 'bin').mkdir(parents=True)
+            python = runtime / 'bin' / 'python3'
+            python.write_text(
+                '#!/bin/sh\n'
+                f'exec {shlex.quote(sys.executable)} "$@"\n'
+            )
+            python.chmod(0o700)
             diff = '''#!/usr/bin/env bash
 set -eu
 [[ ${SYSTEM_ACCESSTOKEN:-} == synthetic-devops-secret ]]
@@ -35,6 +45,9 @@ exit {status}
             (root / 'diff').write_text(diff)
             (root / 'review').write_text(review)
             source = (ROOT / 'azure-devops-launcher.sh').read_text()
+            venv_marker = '/data01/codex-environment/venv'
+            self.assertIn(venv_marker, source)
+            source = source.replace(venv_marker, str(runtime))
             for key, value in [('HELPER_COMMIT', 'a'*40), ('DIFF_HELPER_SHA256', hashlib.sha256(diff.encode()).hexdigest()), ('CODEX_HELPER_SHA256', hashlib.sha256(review.encode()).hexdigest())]:
                 source = re.sub(r'readonly '+key+r'="[^"]*"', f'readonly {key}="{value}"', source)
             script = root / 'launcher.sh'
@@ -88,6 +101,10 @@ pathlib.Path(sys.argv[sys.argv.index('--output')+1]).write_bytes(content)
         result=self.run_case(download_fail=True)
         self.assertEqual(result.returncode,1)
         self.assertIn('Helper download failed',result.stdout)
+
+    def test_inline_launcher_length(self):
+        source = (ROOT / 'azure-devops-launcher.sh').read_bytes()
+        self.assertLess(len(source), 5000)
 
 if __name__ == '__main__':
     unittest.main()

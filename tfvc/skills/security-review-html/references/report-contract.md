@@ -27,6 +27,24 @@ represented by `null` only where the JSON schema permits it, or by an empty
 array where the schema defines a collection. Do not invent text to fill an
 unknown value.
 
+The caller may place a `report-scaffold.html` beside these inputs. The trusted
+renderer creates this scaffold from the validated values and the pinned
+stylesheet before the presentation call. It is a formatting reference derived
+from the same facts, not a second fact source or a fallback report. A model
+candidate may reproduce it exactly, and the independent validator still must
+validate the candidate. A retry diagnostic may identify only a structural
+path/type; it must never contain candidate text or input values.
+
+The caller may also place `source-locations.json` beside the inputs. This
+optional artifact is produced by the trusted helper from the validated review
+and the unified diff. Its `reviewSha256` and `diffSha256` must match
+`provenance.hashes.review` and `provenance.hashes.diff`, its finding IDs must
+match the review exactly, and each non-null range must contain a TFVC path and
+positive ordered source lines. The presentation validator checks those hashes,
+IDs, paths, and ranges before rendering. It is the only source for the fixed
+`Source location (before)` and `Source location (after)` values. A null range
+is rendered as `Unavailable in supplied diff`.
+
 `counts` contains `critical`, `high`, `medium`, `low`, `info`, `limitations`,
 and `totalFindings`. `policy` contains the five fixed policy fields. The
 `provenance.hashes` object contains `diff`, `schema`, `template`, `review`,
@@ -159,6 +177,15 @@ following labels in order: `Category`, `Security relevant`, `Confidence`, `Symbo
 steps`, and `Standards`. Nullable values use the fixed `None` paragraph;
 verification steps and standards use the fixed list rendering. Standards are
 rendered as `{id} — {name}`.
+
+The file metadata paragraph and the labeled evidence fields are the source of
+truth for a finding's file and code context. The optional source-location map is
+the source of truth for diff-grounded before/after line ranges; preserve its
+exact path and range. This presentation pass has no diff and therefore cannot
+create a source line, range, snippet, impact, recommendation, remediation, or
+verification step. If no map or range is available, render
+`Unavailable in supplied diff` and keep the supplied path and exact evidence
+text.
 
 The fixed fallback renderer uses the same structure and stylesheet, with
 `data-report-kind="fallback"`, a `fallback` report-status badge class, and a

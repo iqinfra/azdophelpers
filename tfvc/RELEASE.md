@@ -106,7 +106,14 @@ tfvc-changeset-N-codex-review.md
 tfvc-changeset-N-codex-review.html
 report-meta.json
 review-manifest.json
+source-locations.json
 ```
+
+When the HTML pass fails after valid analysis, the artifact also contains
+`report-diagnostic.json`. It records only allowlisted stage codes, numeric exit
+statuses, and fixed next actions; raw Codex, validator, and source diagnostics
+are never uploaded. A single fresh HTML attempt is made after an independent
+contract rejection, and it must pass the same validator before publication.
 
 Open the downloaded HTML and check the changeset, coverage, changed-file
 inventory, summary, every finding overview row, every finding detail, gate
@@ -126,10 +133,10 @@ and [UploadSummary](https://learn.microsoft.com/en-us/azure/devops/pipelines/scr
 
 | Condition | Exit | Published output |
 | --- | ---: | --- |
-| Valid review, no blocking finding or limitation | `0` | JSON, Markdown, HTML, metadata, normalized manifest |
-| Valid review with Critical/High finding or limitation | `2` | The same five files, uploaded before the gate error |
+| Valid review, no blocking finding or limitation | `0` | JSON, Markdown, HTML, metadata, normalized manifest, source locations |
+| Valid review with Critical/High finding or limitation | `2` | The same six files, uploaded before the gate error |
 | Analysis API error, malformed JSON, bad schema, bad manifest, or bad pin | `1` | No review report |
-| HTML Codex error or independent HTML validation failure | `1` | Valid JSON, Markdown, metadata, normalized manifest, and an explicitly labeled deterministic fallback when it can be produced; no rejected `codex-review.html` |
+| HTML Codex error or independent HTML validation failure | `1` | Valid JSON, Markdown, metadata, normalized manifest, source locations, sanitized `report-diagnostic.json`, and an explicitly labeled deterministic fallback when it can be produced; no rejected `codex-review.html` |
 
 `report-meta.json` is authoritative for the analysis decision, report status,
 coverage, counts, provenance, and input hashes. A presentation pass must not

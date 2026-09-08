@@ -14,9 +14,10 @@ import html
 import json
 import re
 import sys
+import importlib.util
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 
 MAX_HTML_BYTES = 10 * 1024 * 1024
@@ -128,6 +129,8 @@ CSP = (
     "img-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; "
     "form-action 'none'"
 )
+SOURCE_LOCATION_UNAVAILABLE = "Unavailable in supplied diff"
+SOURCE_LOCATION_SIDES = ("before", "after")
 ALLOWED_TAGS = {
     "html",
     "head",
@@ -551,6 +554,113 @@ def validate_meta(value: Any, review: dict[str, Any], manifest: dict[str, Any]) 
     return meta
 
 
+def _validate_location_entries(
+    locations: Any,
+    review: dict[str, Any],
+    manifest: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Validate the location entries used by the renderer.
+
+    The full source-location artifact is checked separately, including its
+    review/diff hashes.  This second small check keeps the renderer safe when
+    callers pass the already-extracted ``locations`` object directly (as the
+    unit tests do), and ensures a path shown in HTML belongs to the review.
+    """
+
+    if locations is None:
+        return {}
+    if not isinstance(locations, Mapping):
+        fail("source location map must be an object")
+    expected_ids = [finding["id"] for finding in review["findings"]]
+    if set(locations) != set(expected_ids) or len(locations) != len(expected_ids):
+        fail("source location IDs do not match review findings")
+    validated: dict[str, dict[str, Any]] = {}
+    for identifier in expected_ids:
+        location = locations[identifier]
+        if not isinstance(location, Mapping) or set(location) != set(SOURCE_LOCATION_SIDES):
+            fail("source location entry has an invalid shape")
+        entry: dict[str, Any] = {}
+        for side in SOURCE_LOCATION_SIDES:
+            value = location[side]
+            if value is None:
+                entry[side] = None
+                continue
+            if not isinstance(value, Mapping) or set(value) != {"path", "startLine", "endLine"}:
+                fail("source location range has an invalid shape")
+            path = value["path"]
+            if not isinstance(path, str) or not PATH_RE.fullmatch(path):
+                fail("source location path is invalid")
+            start = value["startLine"]
+            end = value["endLine"]
+            if (
+                isinstance(start, bool)
+                or not isinstance(start, int)
+                or start < 1
+                or isinstance(end, bool)
+                or not isinstance(end, int)
+                or end < start
+            ):
+                fail("source location line range is invalid")
+            if not finding_file_matches(path, manifest):
+                fail("source location path is outside the review")
+            entry[side] = {"path": path, "startLine": start, "endLine": end}
+        validated[identifier] = entry
+    return validated
+
+
+def load_source_locations(
+    path: Path | None,
+    review: dict[str, Any],
+    meta: dict[str, Any],
+    manifest: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Read and verify the deterministic diff-grounded location artifact."""
+
+    if path is None:
+        return {}
+    value = read_json(path)
+    try:
+        # ``python -I`` intentionally removes the script directory from the
+        # import path. Load the pinned sibling explicitly while retaining the
+        # renderer's isolated, standard-library-only execution.
+        module_path = Path(__file__).with_name("source_locations.py")
+        spec = importlib.util.spec_from_file_location("_codex_source_locations", module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError
+        source_locations = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = source_locations
+        spec.loader.exec_module(source_locations)
+    except Exception:
+        fail("source location validator is unavailable")
+    errors = source_locations.validate_source_locations(
+        value,
+        finding_ids=[finding["id"] for finding in review["findings"]],
+        changeset=review["changeset"],
+    )
+    if errors:
+        fail("source location map failed independent validation")
+    hashes = meta["provenance"]["hashes"]
+    if value["reviewSha256"] != hashes["review"]:
+        fail("source location map does not match the validated review")
+    if value["diffSha256"] != hashes["diff"]:
+        fail("source location map does not match the validated diff")
+    return _validate_location_entries(value["locations"], review, manifest)
+
+
+def _location_text(
+    locations: Mapping[str, Mapping[str, Any]],
+    identifier: str,
+    side: str,
+) -> str:
+    value = locations.get(identifier, {}).get(side)
+    if value is None:
+        return SOURCE_LOCATION_UNAVAILABLE
+    start = value["startLine"]
+    end = value["endLine"]
+    line_range = str(start) if start == end else f"{start}-{end}"
+    return f"{value['path']}:{line_range}"
+
+
 def normalize_path(path: str) -> str:
     return path.replace("\\", "/").casefold()
 
@@ -665,11 +775,20 @@ def extract_style(template: str) -> str:
     return style.text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def render_document(review: dict[str, Any], meta: dict[str, Any], manifest: dict[str, Any], template: str, *, kind: str = "codex") -> str:
+def render_document(
+    review: dict[str, Any],
+    meta: dict[str, Any],
+    manifest: dict[str, Any],
+    template: str,
+    *,
+    kind: str = "codex",
+    locations: Mapping[str, Mapping[str, Any]] | None = None,
+) -> str:
     """Render the canonical document used by the fallback and test fixtures."""
     style = extract_style(template)
     if kind not in {"codex", "fallback"}:
         fail("invalid report kind")
+    location_entries = _validate_location_entries(locations, review, manifest)
     findings = sorted_findings(review)
     counts = meta["counts"]
     provenance = meta["provenance"]
@@ -769,6 +888,8 @@ def render_document(review: dict[str, Any], meta: dict[str, Any], manifest: dict
             ("Evidence summary", None),
             ("Evidence before", None),
             ("Evidence after", None),
+            ("Source location (before)", None),
+            ("Source location (after)", None),
             ("Recommendation", None),
             ("Remediation example", None),
         ]
@@ -783,6 +904,8 @@ def render_document(review: dict[str, Any], meta: dict[str, Any], manifest: dict
             elif label == "Evidence summary": value = evidence["summary"]
             elif label == "Evidence before": value = evidence["before"]
             elif label == "Evidence after": value = evidence["after"]
+            elif label == "Source location (before)": value = _location_text(location_entries, finding["id"], "before")
+            elif label == "Source location (after)": value = _location_text(location_entries, finding["id"], "after")
             elif label == "Recommendation": value = finding["recommendation"]
             elif label == "Remediation example": value = finding["remediationExample"]
             if label in {"Category", "Security relevant", "Confidence"}:
@@ -936,26 +1059,69 @@ def validate_tree_security(root: Any, *, kind: str) -> None:
                 fail("HTML comments are not allowed")
 
 
-def canonical_node(node: Any) -> tuple[Any, ...]:
-    tag = local_name(node.tag)
-    attrs = tuple(sorted((local_name(key), value) for key, value in node.attrib.items()))
+def _canonical_text(node: Any) -> str:
     text_value = (node.text or "").replace("\r\n", "\n").replace("\r", "\n")
     # Whitespace in an element with children is formatting indentation. A
     # whitespace-only leaf is data and must remain observable, especially for
     # evidence fields.
     if list(node) and not text_value.strip():
         text_value = ""
-    if tag == "style":
+    if local_name(node.tag) == "style":
         text_value = text_value.strip()
+    return text_value
+
+
+def _canonical_attrs(node: Any) -> tuple[tuple[str, str], ...]:
+    return tuple(sorted((local_name(key), value) for key, value in node.attrib.items()))
+
+
+def _canonical_tail_value(node: Any) -> str:
+    tail = (node.tail or "").replace("\r\n", "\n").replace("\r", "\n")
+    # Tail whitespace is formatting indentation; any non-whitespace tail is
+    # meaningful text and participates in the exact comparison.
+    return "" if not tail.strip() else tail
+
+
+def canonical_node(node: Any) -> tuple[Any, ...]:
+    tag = local_name(node.tag)
+    attrs = _canonical_attrs(node)
+    text_value = _canonical_text(node)
     children = tuple((canonical_node(child), canonical_tail(child)) for child in list(node))
     return (tag, attrs, text_value, children)
 
 
 def canonical_tail(node: Any) -> str:
-    tail = (node.tail or "").replace("\r\n", "\n").replace("\r", "\n")
-    # Tail whitespace is formatting indentation; any non-whitespace tail is
-    # meaningful text and participates in the exact comparison.
-    return "" if not tail.strip() else tail
+    return _canonical_tail_value(node)
+
+
+def first_dom_mismatch(candidate: Any, expected: Any, path: str = "/html") -> str | None:
+    """Return a value-free location for the first canonical DOM mismatch.
+
+    Validation diagnostics may be used as bounded model retry feedback.  Keep
+    them structural so source snippets, finding prose, and any accidental
+    candidate values never enter logs or a follow-up prompt.
+    """
+
+    candidate_tag = local_name(candidate.tag)
+    expected_tag = local_name(expected.tag)
+    if candidate_tag != expected_tag:
+        return f"{path}: element tag differs"
+    if _canonical_attrs(candidate) != _canonical_attrs(expected):
+        return f"{path}: attributes differ"
+    if _canonical_text(candidate) != _canonical_text(expected):
+        return f"{path}: text differs"
+    candidate_children = list(candidate)
+    expected_children = list(expected)
+    if len(candidate_children) != len(expected_children):
+        return f"{path}: child count differs"
+    for index, (candidate_child, expected_child) in enumerate(zip(candidate_children, expected_children)):
+        child_path = f"{path}/{local_name(expected_child.tag)}[{index}]"
+        if _canonical_tail_value(candidate_child) != _canonical_tail_value(expected_child):
+            return f"{child_path}: tail text differs"
+        mismatch = first_dom_mismatch(candidate_child, expected_child, child_path)
+        if mismatch is not None:
+            return mismatch
+    return None
 
 
 def expected_template_root(template: str) -> None:
@@ -994,11 +1160,19 @@ def validate_document(candidate: bytes, expected: bytes, *, kind: str) -> None:
     candidate_tree = parse_html(candidate, source="candidate HTML")
     expected_tree = parse_html(expected, source="expected HTML")
     validate_tree_security(candidate_tree, kind=kind)
-    if canonical_node(candidate_tree) != canonical_node(expected_tree):
-        fail("candidate HTML does not exactly match the authoritative report DOM")
+    mismatch = first_dom_mismatch(candidate_tree, expected_tree)
+    if mismatch is not None:
+        fail(f"candidate HTML does not exactly match the authoritative report DOM ({mismatch})")
 
 
-def validate_report(review_path: Path, meta_path: Path, manifest_path: Path, template_path: Path, input_path: Path) -> None:
+def validate_report(
+    review_path: Path,
+    meta_path: Path,
+    manifest_path: Path,
+    template_path: Path,
+    input_path: Path,
+    locations_path: Path | None = None,
+) -> None:
     review_value = read_json(review_path)
     meta_value = read_json(meta_path)
     manifest_value = read_json(manifest_path)
@@ -1006,12 +1180,14 @@ def validate_report(review_path: Path, meta_path: Path, manifest_path: Path, tem
     manifest = validate_manifest(manifest_value)
     meta = validate_meta(meta_value, review, manifest)
     verify_input_hashes(meta, review_path, manifest_path, template_path)
+    locations = load_source_locations(locations_path, review, meta, manifest)
     validate_report_with_values(
         review,
         meta,
         manifest,
         read_bytes(template_path).decode("utf-8"),
         read_bytes(input_path),
+        locations=locations,
     )
 
 
@@ -1021,6 +1197,7 @@ def validate_report_with_values(
     manifest_value: Any,
     template: str,
     candidate: bytes,
+    locations: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> None:
     review = validate_review(review_value)
     manifest = validate_manifest(manifest_value)
@@ -1030,20 +1207,28 @@ def validate_report_with_values(
     if any(not finding_file_matches(finding["file"], manifest) for finding in review["findings"]):
         fail("a finding file is outside the normalized manifest review paths")
     expected_template_root(template)
-    expected = render_document(review, meta, manifest, template, kind="codex")
+    expected = render_document(review, meta, manifest, template, kind="codex", locations=locations)
     validate_document(candidate, expected.encode("utf-8"), kind="codex")
 
 
-def fallback_report(review_path: Path, meta_path: Path, manifest_path: Path, template_path: Path, output_path: Path) -> None:
+def fallback_report(
+    review_path: Path,
+    meta_path: Path,
+    manifest_path: Path,
+    template_path: Path,
+    output_path: Path,
+    locations_path: Path | None = None,
+) -> None:
     review = validate_review(read_json(review_path))
     manifest = validate_manifest(read_json(manifest_path))
     meta = validate_meta(read_json(meta_path), review, manifest)
     verify_input_hashes(meta, review_path, manifest_path, template_path)
+    locations = load_source_locations(locations_path, review, meta, manifest)
     if meta["reportStatus"] != "html-failed":
         fail("deterministic fallback requires reportStatus=html-failed")
     template = read_bytes(template_path).decode("utf-8")
     expected_template_root(template)
-    expected = render_document(review, meta, manifest, template, kind="fallback").encode("utf-8")
+    expected = render_document(review, meta, manifest, template, kind="fallback", locations=locations).encode("utf-8")
     output = expected
     if len(output) > MAX_HTML_BYTES:
         fail("fallback HTML exceeds the output size limit")
@@ -1095,12 +1280,14 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--meta", required=True, type=path_arg)
         sub.add_argument("--manifest", required=True, type=path_arg)
         sub.add_argument("--template", required=True, type=path_arg)
+        sub.add_argument("--locations", type=path_arg, help="validated diff-grounded source-location JSON")
         sub.add_argument("--input" if command == "validate" else "--output", required=True, type=path_arg)
     render = subparsers.add_parser("render", help="render a canonical fixture document")
     render.add_argument("--review", required=True, type=path_arg)
     render.add_argument("--meta", required=True, type=path_arg)
     render.add_argument("--manifest", required=True, type=path_arg)
     render.add_argument("--template", required=True, type=path_arg)
+    render.add_argument("--locations", type=path_arg, help="validated diff-grounded source-location JSON")
     render.add_argument("--output", required=True, type=path_arg)
     render.add_argument("--kind", choices=("codex", "fallback"), default="codex")
     return parser
@@ -1112,10 +1299,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "check-deps":
             check_dependencies()
         elif args.command == "validate":
-            validate_report(args.review, args.meta, args.manifest, args.template, args.input)
+            validate_report(args.review, args.meta, args.manifest, args.template, args.input, args.locations)
             print("HTML report validated")
         elif args.command == "fallback":
-            fallback_report(args.review, args.meta, args.manifest, args.template, args.output)
+            fallback_report(args.review, args.meta, args.manifest, args.template, args.output, args.locations)
             print(f"Fallback HTML written to {args.output}")
         else:
             review = validate_review(read_json(args.review))
@@ -1123,7 +1310,8 @@ def main(argv: list[str] | None = None) -> int:
             meta = validate_meta(read_json(args.meta), review, manifest)
             template = read_bytes(args.template).decode("utf-8")
             expected_template_root(template)
-            output = render_document(review, meta, manifest, template, kind=args.kind).encode("utf-8")
+            locations = load_source_locations(args.locations, review, meta, manifest)
+            output = render_document(review, meta, manifest, template, kind=args.kind, locations=locations).encode("utf-8")
             args.output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             args.output.write_bytes(output)
             args.output.chmod(0o600)
