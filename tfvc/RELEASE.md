@@ -111,8 +111,11 @@ source-locations.json
 
 When the HTML pass fails after valid analysis, the artifact also contains
 `report-diagnostic.json`. It records only allowlisted stage codes, numeric exit
-statuses, and fixed next actions; raw Codex, validator, and source diagnostics
-are never uploaded. A single fresh HTML attempt is made after an independent
+statuses, fixed next actions, and `validatorFeedback`. That feedback contains only
+an allowlisted DOM path/mismatch type or a fixed HTML failure category; it is also
+printed in the task log. Raw Codex, validator, and source diagnostics are never
+uploaded. If a report still fails, share the next run's `report-diagnostic.json`
+including `validatorFeedback`; older diagnostic files omit the rejection detail. A single fresh HTML attempt is made after an independent
 contract rejection, and it must pass the same validator before publication.
 
 Open the downloaded HTML and check the changeset, coverage, changed-file

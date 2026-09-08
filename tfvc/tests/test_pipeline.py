@@ -357,6 +357,16 @@ else:
     html_attempt = sum(record.get("kind") == "html" for record in previous_records)
     if CASE == "html-no-output":
         pass
+    elif CASE == "html-dom-mismatch":
+        candidate.write_text((work / "report-scaffold.html").read_text().replace("<h1>", "<h1>PRIVATE-MODEL-VALUE", 1), encoding="utf-8")
+    elif CASE == "html-attribute-mismatch":
+        candidate.write_text((work / "report-scaffold.html").read_text().replace('lang="en"', 'lang="PRIVATE-MODEL-VALUE"', 1), encoding="utf-8")
+    elif CASE == "html-malformed":
+        candidate.write_text("<!doctype html><html><head><title>PRIVATE-MODEL-VALUE</head>", encoding="utf-8")
+    elif CASE == "html-unclassified":
+        candidate.write_bytes((work / "report-scaffold.html").read_bytes() + bytes([0]) + b"PRIVATE-MODEL-VALUE")
+    elif CASE == "html-fenced":
+        candidate.write_text("```html\n" + (work / "report-scaffold.html").read_text() + "\n```", encoding="utf-8")
     elif CASE == "invalid-html" or (CASE == "html-retry-pass" and html_attempt == 0):
         candidate.write_text("<!doctype html><html><head></head><body><script>alert(1)</script></body></html>", encoding="utf-8")
     else:
@@ -572,7 +582,7 @@ class PipelineTests(unittest.TestCase):
                 diagnostic = json.loads((harness.report_dir / "report-diagnostic.json").read_text(encoding="utf-8"))
                 self.assertEqual(diagnostic["schemaVersion"], 1)
                 self.assertTrue(diagnostic["failures"])
-                self.assertTrue(all(set(item) == {"stage", "code", "exitCode", "action"} for item in diagnostic["failures"]))
+                self.assertTrue(all(set(item) == {"stage", "code", "exitCode", "action", "validatorFeedback"} for item in diagnostic["failures"]))
                 self.assertNotIn("fixture", json.dumps(diagnostic))
                 if case == "render-fail":
                     self.assertEqual([item["code"] for item in diagnostic["failures"]], ["HTML_CLI_EXIT"])
@@ -582,6 +592,25 @@ class PipelineTests(unittest.TestCase):
                         ["HTML_VALIDATION_FAILED", "HTML_RETRY_VALIDATION_FAILED"],
                     )
                 self.assertIn("HTML generation or validation failed", result.stdout)
+                self.assert_clean_temp(harness)
+
+    def test_html_rejection_feedback_is_actionable_and_value_free(self) -> None:
+        for case, expected in (("invalid-html", "forbidden"),
+                               ("html-dom-mismatch", "text differs"),
+                               ("html-attribute-mismatch", "attributes differ"),
+                               ("html-fenced", "doctype"),
+                               ("html-malformed", "strict HTML5"),
+                               ("html-unclassified", "contract mismatch")):
+            with self.subTest(case=case):
+                harness, result = self.run_case(case)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                diagnostic = json.loads((harness.report_dir / "report-diagnostic.json").read_text())
+                self.assertEqual(len(diagnostic["failures"]), 2)
+                for failure in diagnostic["failures"]:
+                    self.assertIn(expected, failure["validatorFeedback"])
+                    self.assertIn(failure["validatorFeedback"], result.stdout)
+                self.assertNotIn("PRIVATE-MODEL-VALUE", json.dumps(diagnostic) + result.stdout)
+                self.assert_no_secret(result)
                 self.assert_clean_temp(harness)
 
     def test_html_retry_recovers_after_validation_rejection(self) -> None:

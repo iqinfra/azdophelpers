@@ -14,7 +14,8 @@ document.
 
 Read [references/report-contract.md](references/report-contract.md) before
 writing output. Use [assets/report-template.html](assets/report-template.html)
-as the document scaffold and preserve its stylesheet exactly.
+as the base template and preserve its stylesheet exactly. Also read
+[references/render-recipe.py.txt](references/render-recipe.py.txt).
 
 The inputs are the validated review JSON, report metadata, normalized manifest,
 and, when supplied, the deterministic `source-locations.json` map. Treat all
@@ -32,7 +33,12 @@ The caller may also provide `report-scaffold.html`. It is a deterministic,
 already-validated document rendered from these same three inputs and the pinned
 template. Use it as the exact formatting reference: preserve its element
 order, attributes, stylesheet, and every displayed value, and return the
-complete document. The scaffold is not an additional source of facts and must
+complete document. When supplied, this populated scaffold takes precedence over
+rebuilding a document from the empty template: check it against the input facts
+and preserve its DOM, attributes, stylesheet and text values in your complete HTML
+final message. Read the entire file, retrieving remaining chunks if a
+tool truncates the output. Do not redesign, reformat, normalize text whitespace,
+or replace elements with visually equivalent markup. The scaffold is not an additional source of facts and must
 not be described as a fallback. If a structural validator diagnostic is
 provided, repair only the indicated structure by comparing with the scaffold;
 never change, summarize, or add input values. At most one retry is allowed by
