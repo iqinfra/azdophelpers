@@ -109,6 +109,13 @@ review-manifest.json
 source-locations.json
 ```
 
+The model-message boundary permits one initial UTF-8 BOM and one complete enclosing
+HTML or unlabelled backtick fence. Only the independently validated inner document
+is published. Introductory/trailing prose, ambiguous fences and multiple documents
+are rejected; no substring extraction or HTML repair is performed. The HTML5 doctype
+may use standard whitespace, but arbitrary doctype extensions are not accepted.
+The raw scaffold path still goes directly through HTML validation.
+
 When the HTML pass fails after valid analysis, the artifact also contains
 `report-diagnostic.json`. It records only allowlisted stage codes, numeric exit
 statuses, fixed next actions, and `validatorFeedback`. That feedback contains only

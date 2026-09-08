@@ -158,6 +158,49 @@ class ReportHtmlTests(unittest.TestCase):
         with self.assertRaises(report_html.ReportError):
             report_html.validate_report_with_values(self.review, self.meta, self.manifest, self.template, mutated.encode())
 
+    def test_message_envelopes_preserve_html_and_still_require_strict_validation(self) -> None:
+        document = report_html.render_document(self.review, self.meta, self.manifest, self.template).encode()
+        for message in (document, b"\xef\xbb\xbf" + document,
+                        b"```html\n" + document + b"\n```",
+                        b" \n```HTML\r\n" + document + b"\r\n```\n",
+                        b"\xef\xbb\xbf```\n" + document + b"\n```"):
+            with self.subTest(prefix=message[:12]):
+                normalized = report_html.normalize_html_message(message)
+                self.assertEqual(normalized, document)
+                report_html.validate_document(normalized, document, kind="codex")
+        # Transport handling must not sanitize active content or factual changes.
+        for changed in (document.replace(b"<h1>", b"<script>alert(1)</script><h1>", 1),
+                        document.replace(b"A high finding.", b"MODEL-ONLY-VALUE", 1)):
+            normalized = report_html.normalize_html_message(b"```html\n" + changed + b"\n```")
+            with self.assertRaises(report_html.ReportError):
+                report_html.validate_document(normalized, document, kind="codex")
+
+    def test_message_boundary_rejects_ambiguous_or_partial_content(self) -> None:
+        document = report_html.render_document(self.review, self.meta, self.manifest, self.template).encode()
+        messages = [b"Here is the report:\n" + document,
+                    b"```html\n" + document + b"\n```\nMore prose",
+                    b"```html\n" + document + b"\n```\n```html\n" + document + b"\n```",
+                    b"```html\n" + document,
+                    b"```html\n<!doctype html><html>\n```",
+                    b"```javascript\n" + document + b"\n```",
+                    b"\xef\xbb\xbf\xef\xbb\xbf" + document,
+                    b"```html\n" + document + document + b"\n```",
+                    b"```html\n" + document + b"EXTRA TEXT\n```"]
+        for message in messages:
+            with self.subTest(prefix=message[:30]):
+                with self.assertRaises(report_html.ReportError):
+                    normalized = report_html.normalize_html_message(message)
+                    report_html.validate_document(normalized, document, kind="codex")
+
+    def test_html5_doctype_whitespace_keeps_strict_validation(self) -> None:
+        document = report_html.render_document(self.review, self.meta, self.manifest, self.template).encode()
+        for doctype in (b"<!DOCTYPE  html>", b"<!doctype\nhtml>", b"<!DOCTYPE html >"):
+            changed = document.replace(b"<!doctype html>", doctype, 1)
+            report_html.validate_document(changed, document, kind="codex")
+        for doctype in (b'<!DOCTYPE html SYSTEM "remote">', b"<!doctype html><!doctype html>"):
+            with self.assertRaises(report_html.ReportError):
+                report_html.validate_document(document.replace(b"<!doctype html>", doctype, 1), document, kind="codex")
+
     def test_dom_mismatch_diagnostic_is_structural_and_value_free(self) -> None:
         candidate = report_html.render_document(self.review, self.meta, self.manifest, self.template)
         mutated = candidate.replace("A high finding.", "MODEL-ONLY-UNTRUSTED", 1)

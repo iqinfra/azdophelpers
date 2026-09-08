@@ -184,9 +184,11 @@ ea746ddbf4c03c09b47f9659983d189c8d78095acade26bf08fa67ba8bd25bf5  schemas/README
 87eae02a336cd8f4c9d6227af423074f7648cbd8ca4e6ba29bb5aa6e2cc70d59  schemas/report-meta-v1.schema.json
 15e4955d71d610e5ef3337e5432ce72a581b4c5dbfdd0efe4fb6f13c6851d90a  schemas/review-v2.schema.json
 d074bba7b44a4379beccc1a8b21398d5d8009166173dd3faa366963cbec82dfc  schemas/source-locations-v1.schema.json
-95978b7e8fedb4c3031e52e2ef0d946c77a3e5a7a486ad4c98fae3313bb96de8  scripts/report_html.py
+af8ebe6940c78d7e07d4f32c1c528ac501763f27516fb009cba8285e55a68bcc  scripts/report_html.py
 af674dfda8485625caf9e28e814acdc0460cd3849c6cdac27fe07ad9c983c8f0  scripts/review_data.py
 99323c1674e7afc629e2e003609fb86d707fe6a10eb6ec3e7b9bed5d6e383610  scripts/source_locations.py
+ede655c2bd201884026d05ae04af09573303f31a64c4ee673d2fe413f955efca  skills/.DS_Store
+6363b2b0101b814449dbf03c1a5e4198b77406ea6c42a932dfaf219b92ae47be  skills/security-review-html/.DS_Store
 433f87b246b7fb4ae255b37aef55539b136f2804a64b45f725bcc3238fea45c8  skills/security-review-html/SKILL.md
 b493efd6b8bce49b80da2d6dce58a6c1fcec35539e8cc2e455e07fde00933b26  skills/security-review-html/assets/report-template.html
 db112cfdc61b4170e7bd8ae685587b40e8d818ce04165f06d4f4f817732ba47e  skills/security-review-html/references/render-recipe.py.txt
@@ -483,7 +485,7 @@ run_html_validation() {
     local candidate=$1 stdout=$2 stderr=$3
     python3 -I "$HTML_TOOL" validate --review "$REVIEW_JSON" --meta "$REVIEW_META" \
         --manifest "$REVIEW_MANIFEST" --template "$TEMPLATE" --locations "$SOURCE_LOCATIONS" \
-        --input "$candidate" \
+        --input "$candidate" --message-output "$candidate.validated" \
         > "$stdout" 2> "$stderr"
 }
 safe_html_feedback() {
@@ -495,6 +497,12 @@ safe_html_feedback() {
             return 0
         fi
         case "$line" in
+            'report_html: candidate message has an ambiguous or incomplete Markdown fence'|'report_html: candidate message fence must contain one complete HTML document')
+                printf 'Candidate has an unsupported or incomplete Markdown envelope; return one complete HTML document only.\n'; return 0 ;;
+            'report_html: candidate message contains an unsupported BOM placement')
+                printf 'Candidate has an unsupported BOM placement; return UTF-8 HTML without a BOM.\n'; return 0 ;;
+            'report_html: candidate message has an unsupported prefix; prose and partial HTML are not extracted')
+                printf 'Candidate has an unsupported prefix or missing HTML doctype; return the complete HTML document without introductory text.\n'; return 0 ;;
             'report_html: candidate HTML must begin with <!doctype html>')
                 printf 'Candidate must begin with the HTML doctype; remove Markdown fences or introductory text.\n'; return 0 ;;
             'report_html: candidate HTML is not valid strict HTML5:'*)
@@ -570,7 +578,7 @@ HTML_RETRY_PROMPT
         report_failed HTML_RETRY_NO_OUTPUT
     fi
     if run_html_validation "$WORK/report.candidate.retry.html" "$WORK/html-retry-validation.stdout" "$WORK/html-retry-validation.stderr"; then
-        cp -- "$WORK/report.candidate.retry.html" "$REVIEW_HTML"
+        cp -- "$WORK/report.candidate.retry.html.validated" "$REVIEW_HTML"
         html_retry_used=1
     else
         html_retry_validation_status=$?
@@ -578,7 +586,7 @@ HTML_RETRY_PROMPT
         report_failed HTML_RETRY_VALIDATION_FAILED
     fi
 else
-    cp -- "$WORK/report.candidate.html" "$REVIEW_HTML"
+    cp -- "$WORK/report.candidate.html.validated" "$REVIEW_HTML"
 fi
 AZURE_KEY=''
 chmod 600 "$REVIEW_JSON" "$REVIEW_MD" "$REVIEW_HTML" "$REVIEW_META" "$REVIEW_MANIFEST" "$SOURCE_LOCATIONS"

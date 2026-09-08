@@ -365,6 +365,10 @@ else:
         candidate.write_text("<!doctype html><html><head><title>PRIVATE-MODEL-VALUE</head>", encoding="utf-8")
     elif CASE == "html-unclassified":
         candidate.write_bytes((work / "report-scaffold.html").read_bytes() + bytes([0]) + b"PRIVATE-MODEL-VALUE")
+    elif CASE == "html-prose":
+        candidate.write_text("PRIVATE-MODEL-VALUE\n" + (work / "report-scaffold.html").read_text(), encoding="utf-8")
+    elif CASE == "html-bom":
+        candidate.write_bytes(bytes([239, 187, 191]) + (work / "report-scaffold.html").read_bytes())
     elif CASE == "html-fenced":
         candidate.write_text("```html\n" + (work / "report-scaffold.html").read_text() + "\n```", encoding="utf-8")
     elif CASE == "invalid-html" or (CASE == "html-retry-pass" and html_attempt == 0):
@@ -598,7 +602,7 @@ class PipelineTests(unittest.TestCase):
         for case, expected in (("invalid-html", "forbidden"),
                                ("html-dom-mismatch", "text differs"),
                                ("html-attribute-mismatch", "attributes differ"),
-                               ("html-fenced", "doctype"),
+                               ("html-prose", "doctype"),
                                ("html-malformed", "strict HTML5"),
                                ("html-unclassified", "contract mismatch")):
             with self.subTest(case=case):
@@ -611,6 +615,19 @@ class PipelineTests(unittest.TestCase):
                     self.assertIn(failure["validatorFeedback"], result.stdout)
                 self.assertNotIn("PRIVATE-MODEL-VALUE", json.dumps(diagnostic) + result.stdout)
                 self.assert_no_secret(result)
+                self.assert_clean_temp(harness)
+
+    def test_wrapped_html_message_publishes_only_validated_document(self) -> None:
+        for case in ("html-fenced", "html-bom"):
+            with self.subTest(case=case):
+                harness, result = self.run_case(case)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assert_common_success_outputs(harness)
+                html = (harness.report_dir / f"tfvc-changeset-{CHANGESET}-codex-review.html").read_bytes()
+                self.assertTrue(html.lstrip().lower().startswith(b"<!doctype html>"))
+                self.assertTrue(html.rstrip().endswith(b"</html>"))
+                self.assertEqual([r["kind"] for r in harness.state_records()], ["analysis", "html"])
+                self.assertNotIn("report-diagnostic.json", harness.outputs())
                 self.assert_clean_temp(harness)
 
     def test_html_retry_recovers_after_validation_rejection(self) -> None:

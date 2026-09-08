@@ -1008,8 +1008,32 @@ def import_html5lib() -> Any:
     return html5lib
 
 
+def normalize_html_message(data: bytes) -> bytes:
+    """Remove only an initial UTF-8 BOM and one whole-message HTML code fence.
+
+    This is a transport boundary, not an HTML repair routine. Callers must still
+    run the unchanged strict report validator before publishing the result.
+    """
+    if data.startswith(b"\xef\xbb\xbf"):
+        data = data[3:]
+    envelope = data.strip(b" \t\r\n")
+    if envelope.startswith(b"```"):
+        match = re.fullmatch(rb"```(?:html)?[ \t]*\r?\n(.*?)\r?\n```", envelope,
+                             flags=re.IGNORECASE | re.DOTALL)
+        if match is None or re.search(rb"(?m)^[ \t]*```", match.group(1)):
+            fail("candidate message has an ambiguous or incomplete Markdown fence")
+        data = match.group(1)
+        if not data.rstrip().lower().endswith(b"</html>"):
+            fail("candidate message fence must contain one complete HTML document")
+    if not re.match(rb"<!doctype[ \t\r\n\f]+html[ \t\r\n\f]*>", data.lstrip(), re.IGNORECASE):
+        if data.startswith(b"\xef\xbb\xbf"):
+            fail("candidate message contains an unsupported BOM placement")
+        fail("candidate message has an unsupported prefix; prose and partial HTML are not extracted")
+    return data
+
+
 def parse_html(data: bytes, *, source: str) -> Any:
-    if not data.lstrip().lower().startswith(b"<!doctype html>"):
+    if not re.match(rb"<!doctype[ \t\r\n\f]+html[ \t\r\n\f]*>", data.lstrip(), re.IGNORECASE):
         fail(f"{source} must begin with <!doctype html>")
     if b"\x00" in data:
         fail(f"{source} contains a NUL byte")
@@ -1172,6 +1196,7 @@ def validate_report(
     template_path: Path,
     input_path: Path,
     locations_path: Path | None = None,
+    message_output_path: Path | None = None,
 ) -> None:
     review_value = read_json(review_path)
     meta_value = read_json(meta_path)
@@ -1181,14 +1206,20 @@ def validate_report(
     meta = validate_meta(meta_value, review, manifest)
     verify_input_hashes(meta, review_path, manifest_path, template_path)
     locations = load_source_locations(locations_path, review, meta, manifest)
+    candidate = read_bytes(input_path)
+    if message_output_path is not None:
+        candidate = normalize_html_message(candidate)
     validate_report_with_values(
         review,
         meta,
         manifest,
         read_bytes(template_path).decode("utf-8"),
-        read_bytes(input_path),
+        candidate,
         locations=locations,
     )
+    if message_output_path is not None:
+        message_output_path.write_bytes(candidate)
+        message_output_path.chmod(0o600)
 
 
 def validate_report_with_values(
@@ -1281,6 +1312,9 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--manifest", required=True, type=path_arg)
         sub.add_argument("--template", required=True, type=path_arg)
         sub.add_argument("--locations", type=path_arg, help="validated diff-grounded source-location JSON")
+        if command == "validate":
+            sub.add_argument("--message-output", type=path_arg,
+                             help="normalize a model message and write HTML only after strict validation")
         sub.add_argument("--input" if command == "validate" else "--output", required=True, type=path_arg)
     render = subparsers.add_parser("render", help="render a canonical fixture document")
     render.add_argument("--review", required=True, type=path_arg)
@@ -1299,7 +1333,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "check-deps":
             check_dependencies()
         elif args.command == "validate":
-            validate_report(args.review, args.meta, args.manifest, args.template, args.input, args.locations)
+            validate_report(args.review, args.meta, args.manifest, args.template, args.input, args.locations, args.message_output)
             print("HTML report validated")
         elif args.command == "fallback":
             fallback_report(args.review, args.meta, args.manifest, args.template, args.output, args.locations)
