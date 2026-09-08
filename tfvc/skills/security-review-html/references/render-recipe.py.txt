@@ -1,3 +1,7 @@
+Response transport: put the complete document produced by this recipe into the
+single `html` string of the final JSON object. Use JSON escaping only; the decoded
+HTML must match this recipe exactly. Do not output raw HTML as the final message.
+
 # Canonical report rendering recipe (instructions, not executable code)
 
 Follow this recipe exactly. The independent validator reconstructs the same

@@ -36,7 +36,7 @@ order, attributes, stylesheet, and every displayed value, and return the
 complete document. When supplied, this populated scaffold takes precedence over
 rebuilding a document from the empty template: check it against the input facts
 and preserve its DOM, attributes, stylesheet and text values in your complete HTML
-final message. Read the entire file, retrieving remaining chunks if a
+value of the `html` field. Read the entire file, retrieving remaining chunks if a
 tool truncates the output. Do not redesign, reformat, normalize text whitespace,
 or replace elements with visually equivalent markup. The scaffold is not an additional source of facts and must
 not be described as a fallback. If a structural validator diagnostic is
@@ -45,7 +45,13 @@ never change, summarize, or add input values. At most one retry is allowed by
 the caller, and a candidate is accepted only after the independent validator
 passes.
 
-Return one complete HTML document beginning with `<!doctype html>`. Keep the
+Return exactly one JSON object with one required field, `html`, containing the
+complete HTML document as a nonempty JSON string. The caller applies the pinned
+`html-response-v1.schema.json` to this final response. Use ordinary JSON string
+escaping for quotes, newlines and backslashes; the decoded value must preserve
+the HTML exactly. Do not include extra fields, prose or Markdown fences around
+either the JSON object or its HTML value. The HTML string must begin with
+`<!doctype html>`. Keep the
 required element and attribute structure from the contract. Escape all text as
 HTML text, keep links to local finding anchors only, and do not add scripts,
 event handlers, forms, frames, objects, embeds, SVG, MathML, external assets,

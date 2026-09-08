@@ -158,6 +158,55 @@ class ReportHtmlTests(unittest.TestCase):
         with self.assertRaises(report_html.ReportError):
             report_html.validate_report_with_values(self.review, self.meta, self.manifest, self.template, mutated.encode())
 
+    def test_structured_response_extracts_exact_html_before_validation(self) -> None:
+        document = report_html.render_document(self.review, self.meta, self.manifest, self.template).encode()
+        response = json.dumps({"html": document.decode()}).encode()
+        decoded = report_html.decode_html_response(response)
+        self.assertEqual(decoded, document)
+        report_html.validate_document(decoded, document, kind="codex")
+        for value in (document.replace(b"<h1>", b"<script>alert(1)</script><h1>", 1),
+                      document.replace(b"A high finding.", b"MODEL-ONLY-VALUE", 1),
+                      b"```html\n" + document + b"\n```", document + document):
+            decoded = report_html.decode_html_response(json.dumps({"html": value.decode()}).encode())
+            self.assertEqual(decoded, value)
+            with self.assertRaises(report_html.ReportError):
+                report_html.validate_document(decoded, document, kind="codex")
+
+    def test_structured_response_rejects_invalid_envelopes_without_echoing_values(self) -> None:
+        for response in (b'', b'not JSON PRIVATE-VALUE', b'{', b'[]', b'null', b'{}',
+                         b'{"html":null}', b'{"html":42}', b'{"html":true}', b'{"html":[]}',
+                         b'{"html":""}', b'{"html":" \t "}',
+                         b'{"html":"x","PRIVATE-VALUE":1}', b'{"html":"x","html":"PRIVATE-VALUE"}',
+                         b'{"html":"x"} {"html":"PRIVATE-VALUE"}', b'{"html":NaN}',
+                         b'{"html":"\xff"}', b'{"html":"\\ud800"}',
+                         b'```json\n{"html":"PRIVATE-VALUE"}\n```',
+                         b'{"html":' + b'9' * 5000 + b'}'):
+            with self.subTest(response=response):
+                with self.assertRaises(report_html.ResponseError) as error:
+                    report_html.decode_html_response(response)
+                self.assertNotIn("PRIVATE-VALUE", str(error.exception))
+        from unittest.mock import patch
+        with patch.object(report_html, "MAX_RESPONSE_BYTES", 10):
+            with self.assertRaises(report_html.ResponseError):
+                report_html.decode_html_response(b'{"html":"more than ten bytes"}')
+        with patch.object(report_html, "MAX_HTML_BYTES", 2):
+            with self.assertRaises(report_html.ResponseError):
+                report_html.decode_html_response(b'{"html":"abc"}')
+
+    def test_response_diagnostic_reports_only_size_shape_and_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "response"
+            for data, expected in ((b'{"PRIVATE-VALUE":1}', "json-object"), (b'[]', "json-array"),
+                                   (b'<!doctype html>', "raw-html"), (b'```html', "markdown-fenced"),
+                                   (b'PRIVATE-VALUE', "other-text"), (b'', "empty")):
+                path.write_bytes(data)
+                info = report_html.response_diagnostic(path, "response-envelope")
+                self.assertEqual(info, {"responseByteCount": len(data), "responseFormatCategory": expected,
+                                        "failureStage": "response-envelope"})
+                self.assertNotIn("PRIVATE-VALUE", json.dumps(info))
+            path.unlink()
+            self.assertEqual(report_html.response_diagnostic(path, "output")["responseFormatCategory"], "missing")
+
     def test_message_envelopes_preserve_html_and_still_require_strict_validation(self) -> None:
         document = report_html.render_document(self.review, self.meta, self.manifest, self.template).encode()
         for message in (document, b"\xef\xbb\xbf" + document,
@@ -359,6 +408,28 @@ class ReportHtmlTests(unittest.TestCase):
                 ),
                 0,
             )
+
+            structured_path = root / "response.json"
+            validated_path = root / "validated.html"
+            diagnostic_path = root / "response-diagnostic.json"
+            command = ["validate", "--review", str(review_path), "--meta", str(meta_path),
+                       "--manifest", str(manifest_path), "--template", str(template_path),
+                       "--locations", str(locations_path), "--input", str(structured_path),
+                       "--response-output", str(validated_path), "--diagnostic-output", str(diagnostic_path)]
+            structured_path.write_text(json.dumps({"html": rendered}))
+            self.assertEqual(report_html.main(command), 0)
+            self.assertEqual(validated_path.read_bytes(), rendered.encode())
+            self.assertFalse(diagnostic_path.exists())
+            validated_path.unlink()
+            for response, stage in ((b'{"html":"x","html":"PRIVATE-VALUE"}', "response-envelope"),
+                                    (json.dumps({"html": rendered.replace("<h1>", "<script>x</script><h1>", 1)}).encode(), "html-validation")):
+                structured_path.write_bytes(response)
+                self.assertEqual(report_html.main(command), 1)
+                self.assertFalse(validated_path.exists(), "rejected content must never be written as publishable HTML")
+                diagnostic = json.loads(diagnostic_path.read_text())
+                self.assertEqual(diagnostic["failureStage"], stage)
+                self.assertEqual(diagnostic["responseByteCount"], len(response))
+                self.assertNotIn("PRIVATE-VALUE", diagnostic_path.read_text())
 
             output_path = root / "scaffold.html"
             self.assertEqual(

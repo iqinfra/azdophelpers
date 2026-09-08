@@ -30,3 +30,5 @@ scenario, exploitability, before/after evidence, remediation example,
 verification steps, standards, and an explicit `securityRelevant` value.
 `report-meta-v1.schema.json` is generated outside model control and records the
 deterministic decision, coverage, hashes, report status, and gate policy.
+
+`html-response-v1.schema.json` defines the second Codex pass and retry response: exactly one required `html` string, with no extra properties. The helper independently rejects duplicate keys, blank strings and invalid transport before validating the complete decoded HTML.

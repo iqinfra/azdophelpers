@@ -21,6 +21,7 @@ from typing import Any, Iterable, Mapping
 
 
 MAX_HTML_BYTES = 10 * 1024 * 1024
+MAX_RESPONSE_BYTES = 6 * MAX_HTML_BYTES + 1024
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 REVIEW_KEYS = {
     "schemaVersion",
@@ -1008,6 +1009,70 @@ def import_html5lib() -> Any:
     return html5lib
 
 
+class ResponseError(ReportError):
+    """Invalid structured response transport; messages never quote candidate data."""
+
+
+def decode_html_response(data: bytes) -> bytes:
+    if len(data) > MAX_RESPONSE_BYTES:
+        raise ResponseError("HTML response exceeds the transport size limit")
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ResponseError("HTML response contains duplicate object keys")
+            result[key] = value
+        return result
+    def reject_constant(value: str) -> None:
+        raise ResponseError("HTML response contains a non-JSON numeric constant")
+    try:
+        value = json.loads(data.decode("utf-8"), object_pairs_hook=unique_object,
+                           parse_constant=reject_constant)
+    except (UnicodeError, ValueError, RecursionError):
+        raise ResponseError("HTML response is not valid UTF-8 JSON") from None
+    if not isinstance(value, dict) or set(value) != {"html"}:
+        raise ResponseError("HTML response must contain exactly the html field")
+    if not isinstance(value["html"], str) or not value["html"].strip():
+        raise ResponseError("HTML response html field must be a nonempty string")
+    try:
+        document = value["html"].encode("utf-8")
+    except UnicodeError:
+        raise ResponseError("HTML response html field is not valid Unicode") from None
+    if len(document) > MAX_HTML_BYTES:
+        raise ResponseError("HTML response decoded document exceeds the HTML size limit")
+    return document
+
+
+def response_diagnostic(path: Path, failure_stage: str) -> dict[str, Any]:
+    """Describe transport shape without returning any model-controlled text."""
+    count: int | None = None
+    category = "unavailable"
+    try:
+        count = path.stat().st_size
+        with path.open("rb") as stream:
+            prefix = stream.read(256).lstrip()
+        if count == 0:
+            category = "empty"
+        elif count > MAX_RESPONSE_BYTES:
+            category = "oversized"
+        elif prefix.startswith(b"{"):
+            category = "json-object"
+        elif prefix.startswith(b"["):
+            category = "json-array"
+        elif prefix.startswith((b"```", b"~~~")):
+            category = "markdown-fenced"
+        elif prefix.lower().startswith((b"<!doctype", b"<html")):
+            category = "raw-html"
+        else:
+            category = "other-text"
+    except FileNotFoundError:
+        category = "missing"
+    except OSError:
+        pass
+    return {"responseByteCount": count, "responseFormatCategory": category,
+            "failureStage": failure_stage}
+
+
 def normalize_html_message(data: bytes) -> bytes:
     """Remove only an initial UTF-8 BOM and one whole-message HTML code fence.
 
@@ -1197,6 +1262,7 @@ def validate_report(
     input_path: Path,
     locations_path: Path | None = None,
     message_output_path: Path | None = None,
+    response_output_path: Path | None = None,
 ) -> None:
     review_value = read_json(review_path)
     meta_value = read_json(meta_path)
@@ -1206,7 +1272,12 @@ def validate_report(
     meta = validate_meta(meta_value, review, manifest)
     verify_input_hashes(meta, review_path, manifest_path, template_path)
     locations = load_source_locations(locations_path, review, meta, manifest)
-    candidate = read_bytes(input_path)
+    if response_output_path is not None:
+        if input_path.stat().st_size > MAX_RESPONSE_BYTES:
+            raise ResponseError("HTML response exceeds the transport size limit")
+        candidate = decode_html_response(read_bytes(input_path, limit=MAX_RESPONSE_BYTES))
+    else:
+        candidate = read_bytes(input_path)
     if message_output_path is not None:
         candidate = normalize_html_message(candidate)
     validate_report_with_values(
@@ -1217,9 +1288,10 @@ def validate_report(
         candidate,
         locations=locations,
     )
-    if message_output_path is not None:
-        message_output_path.write_bytes(candidate)
-        message_output_path.chmod(0o600)
+    output_path = response_output_path or message_output_path
+    if output_path is not None:
+        output_path.write_bytes(candidate)
+        output_path.chmod(0o600)
 
 
 def validate_report_with_values(
@@ -1305,6 +1377,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("check-deps", help="verify pinned parser dependencies")
+    info = subparsers.add_parser("response-info", help="emit value-free response transport metadata")
+    info.add_argument("--input", required=True, type=path_arg)
+    info.add_argument("--stage", required=True, choices=("cli", "output", "response-envelope", "html-validation"))
     for command in ("validate", "fallback"):
         sub = subparsers.add_parser(command)
         sub.add_argument("--review", required=True, type=path_arg)
@@ -1313,7 +1388,11 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--template", required=True, type=path_arg)
         sub.add_argument("--locations", type=path_arg, help="validated diff-grounded source-location JSON")
         if command == "validate":
-            sub.add_argument("--message-output", type=path_arg,
+            outputs = sub.add_mutually_exclusive_group()
+            outputs.add_argument("--response-output", type=path_arg,
+                                 help="decode structured html response and write only after full validation")
+            sub.add_argument("--diagnostic-output", type=path_arg)
+            outputs.add_argument("--message-output", type=path_arg,
                              help="normalize a model message and write HTML only after strict validation")
         sub.add_argument("--input" if command == "validate" else "--output", required=True, type=path_arg)
     render = subparsers.add_parser("render", help="render a canonical fixture document")
@@ -1333,8 +1412,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "check-deps":
             check_dependencies()
         elif args.command == "validate":
-            validate_report(args.review, args.meta, args.manifest, args.template, args.input, args.locations, args.message_output)
+            validate_report(args.review, args.meta, args.manifest, args.template, args.input, args.locations, args.message_output, args.response_output)
             print("HTML report validated")
+        elif args.command == "response-info":
+            print(json.dumps(response_diagnostic(args.input, args.stage)))
         elif args.command == "fallback":
             fallback_report(args.review, args.meta, args.manifest, args.template, args.output, args.locations)
             print(f"Fallback HTML written to {args.output}")
@@ -1350,6 +1431,10 @@ def main(argv: list[str] | None = None) -> int:
             args.output.write_bytes(output)
             args.output.chmod(0o600)
     except ReportError as exc:
+        if args.command == "validate" and args.diagnostic_output is not None:
+            stage = "response-envelope" if isinstance(exc, ResponseError) else "html-validation"
+            args.diagnostic_output.write_text(json.dumps(response_diagnostic(args.input, stage)))
+            args.diagnostic_output.chmod(0o600)
         print(f"report_html: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:

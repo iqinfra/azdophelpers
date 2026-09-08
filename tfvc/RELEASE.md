@@ -109,16 +109,20 @@ review-manifest.json
 source-locations.json
 ```
 
-The model-message boundary permits one initial UTF-8 BOM and one complete enclosing
-HTML or unlabelled backtick fence. Only the independently validated inner document
-is published. Introductory/trailing prose, ambiguous fences and multiple documents
-are rejected; no substring extraction or HTML repair is performed. The HTML5 doctype
-may use standard whitespace, but arbitrary doctype extensions are not accepted.
-The raw scaffold path still goes directly through HTML validation.
+Both model attempts use the pinned `html-response-v1.schema.json`. Their final
+response must be exactly one JSON object with a nonempty `html` string. The helper
+rejects duplicate/extra keys and invalid encoding, then independently validates the
+entire decoded HTML before writing the publishable document. Prose extraction,
+Markdown unwrapping and HTML repair are not performed on this structured path.
+The raw scaffold still goes directly through HTML validation. Standard HTML5
+doctype whitespace is accepted; arbitrary doctype extensions are rejected.
 
 When the HTML pass fails after valid analysis, the artifact also contains
 `report-diagnostic.json`. It records only allowlisted stage codes, numeric exit
-statuses, fixed next actions, and `validatorFeedback`. That feedback contains only
+statuses, fixed next actions, and `validatorFeedback`. HTML attempt failures also
+include `responseByteCount`, a fixed `responseFormatCategory`, and `failureStage`
+(`cli`, `output`, `response-envelope` or `html-validation`). These fields never
+contain raw model text. That feedback contains only
 an allowlisted DOM path/mismatch type or a fixed HTML failure category; it is also
 printed in the task log. Raw Codex, validator, and source diagnostics are never
 uploaded. If a report still fails, share the next run's `report-diagnostic.json`

@@ -5,6 +5,17 @@ second Codex presentation pass. It is deliberately narrow so that an
 independent validator can compare the generated document with the validated
 facts.
 
+## Response transport
+
+Both the first reporting attempt and its bounded retry return one JSON object:
+`{"html": "the complete HTML document"}`. The pinned response schema requires only
+that string field and forbids additional properties. The caller rejects duplicate
+keys, non-JSON constants, missing/extra fields, empty strings and invalid encoding,
+then validates the entire decoded HTML against this contract before publication.
+No prose extraction, Markdown unwrapping, BOM removal or HTML repair occurs on
+this structured path. The remaining sections describe the decoded HTML value,
+not the outer JSON response. JSON-escape the value without changing its content.
+
 ## Inputs
 
 The prompt supplies three JSON values and this skill's template:

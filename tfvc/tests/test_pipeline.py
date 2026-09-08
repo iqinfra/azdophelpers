@@ -324,6 +324,11 @@ if kind == "analysis":
             review["limitations"] = ["The supplied package leaves one generated file without a text diff."]
         candidate.write_text(json.dumps(review), encoding="utf-8")
 else:
+    if "--output-schema" not in sys.argv:
+        raise SystemExit(16)
+    response_schema = json.loads(Path(sys.argv[sys.argv.index("--output-schema") + 1]).read_text())
+    if response_schema != {"type": "object", "properties": {"html": {"type": "string"}}, "required": ["html"], "additionalProperties": False}:
+        raise SystemExit(17)
     if (work / ".agents/skills/security-review-html/SKILL.md").is_file() is False:
         print("fixture codex: HTML pass did not receive the pinned skill", file=sys.stderr)
         raise SystemExit(10)
@@ -382,6 +387,19 @@ else:
         if result.returncode != 0:
             print(result.stderr or result.stdout, file=sys.stderr)
             raise SystemExit(13)
+
+    if candidate.exists():
+        document = candidate.read_text(encoding="utf-8")
+        if CASE == "response-prose":
+            candidate.write_text("PRIVATE-MODEL-VALUE: report completed", encoding="utf-8")
+        elif CASE == "response-duplicate":
+            candidate.write_text('{"html": ' + json.dumps(document) + ', "html": "PRIVATE-MODEL-VALUE"}', encoding="utf-8")
+        elif CASE == "response-extra":
+            candidate.write_text(json.dumps({"html": document, "PRIVATE-MODEL-VALUE": True}), encoding="utf-8")
+        elif CASE == "response-empty":
+            candidate.write_text('{"html":"   "}', encoding="utf-8")
+        else:
+            candidate.write_text(json.dumps({"html": document}), encoding="utf-8")
 
 state = []
 if STATE.exists():
@@ -521,7 +539,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual([record["kind"] for record in records], ["analysis", "html"])
         self.assertTrue(all(record["isolatedFlags"] for record in records))
         self.assertTrue(records[0]["hasSchema"])
-        self.assertFalse(records[1]["hasSchema"])
+        self.assertTrue(records[1]["hasSchema"])
         self.assertFalse(records[0]["skill"])
         self.assertTrue(records[1]["skill"])
         self.assertTrue(any(name.endswith("/SKILL.md") for name in records[1]["skillFiles"]))
@@ -586,7 +604,7 @@ class PipelineTests(unittest.TestCase):
                 diagnostic = json.loads((harness.report_dir / "report-diagnostic.json").read_text(encoding="utf-8"))
                 self.assertEqual(diagnostic["schemaVersion"], 1)
                 self.assertTrue(diagnostic["failures"])
-                self.assertTrue(all(set(item) == {"stage", "code", "exitCode", "action", "validatorFeedback"} for item in diagnostic["failures"]))
+                self.assertTrue(all(set(item) == {"stage", "code", "exitCode", "action", "validatorFeedback", "responseByteCount", "responseFormatCategory", "failureStage"} for item in diagnostic["failures"]))
                 self.assertNotIn("fixture", json.dumps(diagnostic))
                 if case == "render-fail":
                     self.assertEqual([item["code"] for item in diagnostic["failures"]], ["HTML_CLI_EXIT"])
@@ -617,8 +635,8 @@ class PipelineTests(unittest.TestCase):
                 self.assert_no_secret(result)
                 self.assert_clean_temp(harness)
 
-    def test_wrapped_html_message_publishes_only_validated_document(self) -> None:
-        for case in ("html-fenced", "html-bom"):
+    def test_structured_html_response_publishes_only_validated_document(self) -> None:
+        for case in ("pass", "medium"):
             with self.subTest(case=case):
                 harness, result = self.run_case(case)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -629,6 +647,36 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual([r["kind"] for r in harness.state_records()], ["analysis", "html"])
                 self.assertNotIn("report-diagnostic.json", harness.outputs())
                 self.assert_clean_temp(harness)
+
+    def test_structured_response_failures_are_classified_without_candidate_values(self) -> None:
+        for case, category in (("response-prose", "other-text"),
+                               ("response-duplicate", "json-object"),
+                               ("response-extra", "json-object"),
+                               ("response-empty", "json-object")):
+            with self.subTest(case=case):
+                harness, result = self.run_case(case)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                diagnostic = json.loads((harness.report_dir / "report-diagnostic.json").read_text())
+                self.assertEqual(len(diagnostic["failures"]), 2)
+                for failure in diagnostic["failures"]:
+                    self.assertEqual(failure["failureStage"], "response-envelope")
+                    self.assertEqual(failure["responseFormatCategory"], category)
+                    self.assertGreater(failure["responseByteCount"], 0)
+                self.assertNotIn("PRIVATE-MODEL-VALUE", json.dumps(diagnostic) + result.stdout)
+                self.assertNotIn(f"tfvc-changeset-{CHANGESET}-codex-review.html", harness.outputs())
+                self.assertTrue((harness.report_dir / "codex-review-fallback.html").is_file())
+                self.assert_no_secret(result)
+                self.assert_clean_temp(harness)
+
+    def test_structured_html_value_does_not_unwrap_markdown_or_bom(self) -> None:
+        for case in ("html-fenced", "html-bom"):
+            with self.subTest(case=case):
+                harness, result = self.run_case(case)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                diagnostic = json.loads((harness.report_dir / "report-diagnostic.json").read_text())
+                self.assertTrue(all(f["failureStage"] == "html-validation" for f in diagnostic["failures"]))
+                self.assertTrue(all(f["responseFormatCategory"] == "json-object" for f in diagnostic["failures"]))
+                self.assertNotIn(f"tfvc-changeset-{CHANGESET}-codex-review.html", harness.outputs())
 
     def test_html_retry_recovers_after_validation_rejection(self) -> None:
         harness, result = self.run_case("html-retry-pass")
